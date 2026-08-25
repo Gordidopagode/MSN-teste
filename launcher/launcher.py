@@ -282,6 +282,13 @@ class LocalServerController:
         output_path = self.base_dir / "logs" / "server.log"
         self._output_handle = output_path.open("ab")
         env = os.environ.copy()
+        # O launcher hospeda o backend e o Hub no mesmo computador. Uma
+        # origem externa herdada do shell (por exemplo, de um teste antigo)
+        # pode bloquear o handshake local com HTTP 403. Em modo local, deixe
+        # o servidor aceitar as origens do próprio frontend; as credenciais
+        # SMTP, se existirem, continuam sendo herdadas e só são usadas sob
+        # demanda durante a recuperação de senha.
+        env.pop("MSN_ALLOWED_ORIGINS", None)
         env.update({
             "MSN_HOST": "127.0.0.1",
             "MSN_PORT": str(endpoint.port),
