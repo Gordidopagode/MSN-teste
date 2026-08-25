@@ -1,0 +1,4 @@
+# Build and test dependencies for the launcher project.
+# The runtime launcher uses only Python standard library + Tkinter.
+pyinstaller>=6.0
+pytest>=8.0

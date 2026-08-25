@@ -1,0 +1,5 @@
+argon2-cffi>=25.1,<26
+pytest>=9.1,<10
+pytest-asyncio>=1.4,<2
+websockets>=17,<18
+Pillow>=12,<13

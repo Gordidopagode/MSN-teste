@@ -1,0 +1,28 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Persistent/private runtime data
+/data/
+*.db
+*.db-shm
+*.db-wal
+/uploads/
+
+# Logs
+*.log
+/logs/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Frontend build/dependencies
+node_modules/
+dist/
