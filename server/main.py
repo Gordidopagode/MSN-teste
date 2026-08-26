@@ -19,6 +19,7 @@ import signal
 import sys
 
 from server.config.settings import ServerSettings
+from server.attachments.http import AttachmentHTTPServer
 from server.core import ServerCore
 from server.network.handler import WebSocketHandler
 from websockets.asyncio.server import serve
@@ -39,6 +40,10 @@ def validate_settings(settings: ServerSettings) -> None:
         raise ValueError("MSN_HOST não pode ser vazio.")
     if not (1 <= settings.port <= 65535):
         raise ValueError(f"Porta inválida: {settings.port}")
+    if not (0 <= settings.attachment_http_port <= 65535):
+        raise ValueError(f"Porta HTTP de anexos inválida: {settings.attachment_http_port}")
+    if settings.attachment_http_port == settings.port:
+        raise ValueError("A porta HTTP de anexos não pode ser igual à porta WebSocket.")
     if settings.max_message_length <= 0:
         raise ValueError("MSN_MAX_MESSAGE_LENGTH deve ser positivo.")
 
@@ -55,6 +60,14 @@ async def run_server(settings: ServerSettings) -> None:
 
     core = ServerCore(settings)
     ws_handler = WebSocketHandler(core)
+    attachment_http = AttachmentHTTPServer(core)
+    attachment_http_port = settings.attachment_http_port or 0
+    await attachment_http.start(settings.host, attachment_http_port)
+    actual_attachment_port = attachment_http.sockets[0].getsockname()[1]
+    if not settings.public_base_url:
+        public_host = "127.0.0.1" if settings.host in {"0.0.0.0", "::"} else settings.host
+        settings.public_base_url = f"http://{public_host}:{actual_attachment_port}"
+    log.info("Downloads de anexos disponíveis em %s", settings.public_base_url)
 
     stop = asyncio.get_running_loop().create_future()
 
@@ -68,19 +81,23 @@ async def run_server(settings: ServerSettings) -> None:
         except NotImplementedError:  # Windows
             pass
 
-    async with serve(
-        ws_handler.handle,
-        settings.host,
-        settings.port,
-        ping_interval=20,
-        ping_timeout=60,
-        max_size=256 * 1024,
-        origins=settings.allowed_origins,
-    ) as server:
-        log.info("Servidor pronto. Aguardando conexões em %s:%d",
-                 settings.host, settings.port)
-        await stop
-        log.info("Desligamento solicitado. Encerrando conexões...")
+    try:
+        async with serve(
+            ws_handler.handle,
+            settings.host,
+            settings.port,
+            ping_interval=20,
+            ping_timeout=60,
+            max_size=256 * 1024,
+            origins=settings.allowed_origins,
+            process_request=ws_handler.process_request,
+        ) as server:
+            log.info("Servidor pronto. Aguardando conexões em %s:%d (anexos HTTP em %d)",
+                     settings.host, settings.port, actual_attachment_port)
+            await stop
+            log.info("Desligamento solicitado. Encerrando conexões...")
+    finally:
+        await attachment_http.close()
 
     log.info("MSN Messenger Server desligado com sucesso.")
 

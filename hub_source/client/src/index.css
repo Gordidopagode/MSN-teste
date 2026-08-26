@@ -392,3 +392,62 @@ button:disabled { cursor: not-allowed; opacity: 0.62; }
 .emoji-picker button:hover { background: #edf6fa; }
 .attachment-note { padding: 6px 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid #e1d4b9; color: #8c7143; background: #fff9ec; font-size: 10px; }
 .attachment-note button { display: inline-grid; place-items: center; padding: 2px; border: 0; color: inherit; background: transparent; }
+
+/* Extended MSN controls */
+.settings-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin: 12px 0 10px; padding: 3px; border: 1px solid #c4d9e1; border-radius: 4px; background: #eef7fa; }
+.settings-tabs button { padding: 6px 5px; border: 0; border-radius: 3px; color: #78909a; background: transparent; font-size: 10px; font-weight: 700; }
+.settings-tabs button.is-active { color: var(--blue-deep); background: #fff; box-shadow: 0 1px 3px rgba(52, 101, 123, .12); }
+.settings-category { display: grid; gap: 7px; }
+.settings-category .primary-button { margin: 0; }
+.settings-category select, .settings-input { width: 100%; min-height: 31px; padding: 0 8px; border: 1px solid #b7cdd8; border-radius: 3px; color: var(--ink); background: #fff; font: inherit; font-size: 10px; }
+.settings-subheading { display: flex; align-items: center; gap: 5px; margin-top: 5px; color: #557786; font-size: 10px; }
+.friend-picker { display: grid; gap: 5px; max-height: 180px; overflow: auto; padding: 6px; border: 1px solid #c7dce4; border-radius: 4px; background: #fbfdfe; }
+.friend-picker-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 6px; padding: 5px; border-radius: 3px; color: #456b79; background: #f1f8fa; font-size: 10px; }
+.friend-picker-row:hover { background: #e5f2f6; }
+.friend-picker-row small { color: #81959e; font-size: 9px; }
+.chat-search { display: flex; align-items: center; gap: 6px; margin: 0 14px 6px; padding: 5px 7px; border: 1px solid #c3d9e2; border-radius: 4px; background: #f8fcfd; }
+.chat-search svg { color: #83a7b5; flex: 0 0 auto; }
+.chat-search input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--ink); background: transparent; font: inherit; font-size: 10px; }
+.chat-search .small-button { flex: 0 0 auto; }
+.chat-results { display: grid; gap: 4px; margin: 0 14px 7px; padding: 7px; border: 1px solid #d0e1e6; border-radius: 4px; background: #f8fcfd; font-size: 10px; }
+.chat-results strong { color: #557786; font-size: 10px; }
+.chat-results > span { color: #8b9fa8; }
+.chat-results button { display: flex; justify-content: space-between; gap: 7px; padding: 5px; border: 0; border-radius: 3px; color: #4d7180; background: #eef7fa; text-align: left; font-size: 10px; }
+.chat-results button:hover { background: #e1f0f5; }
+.chat-results time { color: #8aa1aa; font-size: 9px; }
+.message-row { position: relative; }
+.message-pin { position: absolute; right: -3px; bottom: 2px; display: inline-grid; place-items: center; width: 20px; height: 20px; padding: 0; border: 1px solid transparent; border-radius: 50%; color: #91aab4; background: transparent; opacity: 0; transition: opacity 120ms ease, background 120ms ease; }
+.message-row:hover .message-pin, .message-pin.is-pinned { opacity: 1; }
+.message-row.is-highlighted .message-bubble { border-color: #e1b84a; box-shadow: 0 0 0 3px rgba(225, 184, 74, .24); }
+.message-pin:hover, .message-pin.is-pinned { border-color: #c9dce4; color: var(--blue-deep); background: #edf7fa; }
+.attachment-card { display: inline-flex; align-items: center; gap: 8px; max-width: min(360px, 100%); }
+.attachment-card img { width: 72px; height: 72px; object-fit: cover; border-radius: 4px; border: 1px solid #c0d6df; }
+.attachment-card > span { display: grid; gap: 3px; }
+.attachment-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-card small { color: #8098a2; font-size: 9px; }
+.attachment-card a { display: inline-flex; align-items: center; gap: 4px; color: var(--blue-deep); font-size: 9px; font-weight: 700; text-decoration: none; }
+.attachment-card a:hover { text-decoration: underline; }
+.chat-actions { flex-wrap: wrap; }
+@media (max-width: 520px) {
+  .attachment-card { max-width: 240px; }
+  .chat-search { margin-left: 9px; margin-right: 9px; }
+  .chat-results { margin-left: 9px; margin-right: 9px; }
+}
+html[data-msn-theme="dim"] { filter: saturate(.88); }
+html[data-msn-theme="dark"] { --ink: #d9e9ee; --paper: #1e2d34; --line: #4c6974; background: #122027; }
+html[data-msn-theme="dark"] body { background: #122027; color: #d9e9ee; }
+html[data-msn-theme="dark"] .messenger-window, html[data-msn-theme="dark"] .settings-panel, html[data-msn-theme="dark"] .group-composer, html[data-msn-theme="dark"] .chat-menu, html[data-msn-theme="dark"] .emoji-picker { background: #20343d; color: #d9e9ee; }
+html[data-msn-theme="dark"] .conversation-pane, html[data-msn-theme="dark"] .profile-rail { background: #1a2c34; }
+html[data-msn-theme="dark"] input, html[data-msn-theme="dark"] select, html[data-msn-theme="dark"] .settings-input { background: #16272e; color: #d9e9ee; border-color: #51717d; }
+html[data-msn-theme="dark"] .message-bubble, html[data-msn-theme="dark"] .chat-search, html[data-msn-theme="dark"] .chat-results { background: #29434e; color: #d9e9ee; }
+.notification-stack { position: absolute; z-index: 60; top: 43px; right: 14px; display: grid; gap: 6px; width: min(300px, calc(100% - 28px)); }
+.notification-card { display: grid; grid-template-columns: auto 1fr auto; align-items: start; gap: 8px; width: 100%; padding: 8px 9px; border: 1px solid #a8c7d3; border-radius: 4px; color: #456875; background: rgba(255, 255, 255, .98); box-shadow: 0 8px 20px rgba(38, 80, 102, .18); text-align: left; }
+.notification-card > svg:first-child { margin-top: 2px; color: #5f9bb3; }
+.notification-card > svg:last-child { margin-top: 2px; color: #9ab0b8; }
+.notification-card span { display: grid; gap: 2px; min-width: 0; }
+.notification-card strong { overflow: hidden; color: #3d6575; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.notification-card small { overflow: hidden; color: #78919b; font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.notification-card:hover { border-color: #82b1c2; background: #f4fbfd; }
+html[data-msn-theme="dark"] .notification-card { border-color: #527785; color: #d9e9ee; background: #20343d; }
+html[data-msn-theme="dark"] .notification-card strong { color: #d9e9ee; }
+html[data-msn-theme="dark"] .notification-card small { color: #a8c2cb; }

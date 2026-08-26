@@ -5,6 +5,9 @@ import asyncio
 import json
 import shutil
 import tempfile
+import urllib.error
+import urllib.request
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 import websockets
@@ -143,6 +146,13 @@ async def ws_send(ws, **fields) -> dict:
     return json.loads(await ws.recv())
 
 
+async def ws_wait_type(ws, expected):
+    while True:
+        message = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        if message["type"] == expected:
+            return message
+
+
 async def ws_register_login(url, username, password="secret123"):
     ws = await ws_connect(url)
     reg = await ws_send(ws, command="REGISTER", username=username,
@@ -252,4 +262,71 @@ async def test_end_to_end_websocket_multiple_clients():
             await ws_b2.close()
             await ws_c.close()
     finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_modern_features_over_websocket():
+    tmpdir = tempfile.mkdtemp(prefix="msn_modern_e2e_")
+    sockets = []
+    try:
+        core = ServerCore(make_settings(tmpdir, port=0, attachment_http_port=0))
+        from server.attachments.http import AttachmentHTTPServer
+        from server.network.handler import WebSocketHandler
+        from websockets.asyncio.server import serve as ws_serve
+
+        attachment_http = AttachmentHTTPServer(core)
+        await attachment_http.start("127.0.0.1", 0)
+        attachment_port = attachment_http.sockets[0].getsockname()[1]
+        handler = WebSocketHandler(core)
+        async with ws_serve(handler.handle, "127.0.0.1", 0) as srv:
+            host, port = srv.sockets[0].getsockname()
+            core.settings.public_base_url = f"http://{host}:{attachment_port}"
+            url = f"ws://{host}:{port}"
+            ws_a, _, uid_a = await ws_register_login(url, "modern_alice")
+            ws_b, _, uid_b = await ws_register_login(url, "modern_bruno")
+            sockets.extend([ws_a, ws_b])
+
+            created = await ws_send(ws_a, command="CREATE_GROUP", name="Anexos", participants=["modern_bruno"])
+            group_id = created["payload"]["conversation"]["conversation_id"]
+            assert (await ws_wait_type(ws_b, "CONVERSATION_CREATED"))["payload"]["conversation"]["conversation_id"] == group_id
+
+            ready = await ws_send(ws_a, command="BEGIN_ATTACHMENT_UPLOAD", conversation_id=group_id, filename="e2e.txt", mime="text/plain", size=8)
+            assert ready["type"] == "ATTACHMENT_UPLOAD_READY"
+            await ws_a.send(b"e2e data")
+            await ws_a.send(json.dumps({"command": "FINISH_ATTACHMENT_UPLOAD", "upload_id": ready["payload"]["upload_id"]}))
+            complete = await ws_wait_type(ws_a, "ATTACHMENT_UPLOAD_COMPLETE")
+            assert complete["payload"]["attachment"]["download_url"]
+            delivered = await ws_wait_type(ws_b, "MESSAGE")
+            received_attachment = delivered["payload"]["message"]["payload"]["attachment"]
+            assert received_attachment["original_name"] == "e2e.txt"
+            assert parse_qs(urlsplit(received_attachment["download_url"]).query)["user"] == [uid_b]
+            downloaded = await asyncio.to_thread(lambda: urllib.request.urlopen(received_attachment["download_url"], timeout=5).read())
+            assert downloaded == b"e2e data"
+            outsider_url = core._attachment_public_url(received_attachment["attachment_id"], "not-a-participant")
+            with pytest.raises(urllib.error.HTTPError) as denied:
+                await asyncio.to_thread(lambda: urllib.request.urlopen(outsider_url, timeout=5).read())
+            assert denied.value.code == 404
+
+            search = await ws_send(ws_b, command="SEARCH_MESSAGES", conversation_id=group_id, query="e2e.txt")
+            assert search["type"] == "MESSAGE_SEARCH_RESULT"
+            message_id = search["payload"]["messages"][0]["message_id"]
+            pinned = await ws_send(ws_b, command="PIN_MESSAGE", conversation_id=group_id, message_id=message_id)
+            assert pinned["type"] == "MESSAGE_PINNED"
+            assert pinned["payload"]["is_pinned"] is True
+            event_a = await ws_wait_type(ws_a, "MESSAGE_PINNED")
+            assert event_a["payload"]["message"]["message_id"] == message_id
+            listed = await ws_send(ws_a, command="LIST_PINNED_MESSAGES", conversation_id=group_id)
+            assert len(listed["payload"]["messages"]) == 1
+
+            await ws_a.close()
+            await ws_b.close()
+    finally:
+        for ws in sockets:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        if "attachment_http" in locals():
+            await attachment_http.close()
         shutil.rmtree(tmpdir, ignore_errors=True)

@@ -182,6 +182,35 @@ class AuthManager:
         log.info("Password reset completed for user id %s", user["user_id"])
         return user["user_id"]
 
+    # -- account settings -----------------------------------------------------
+
+    async def update_display_name(self, user_id: str, display_name: str) -> dict[str, Any]:
+        value = display_name.strip()
+        if not value:
+            raise AuthError("O nome exibido é obrigatório.")
+        if len(value) > self._settings.max_display_name_length:
+            raise AuthError(f"Nome exibido muito longo (máx. {self._settings.max_display_name_length}).")
+        user = self._store.get_user(user_id)
+        if user is None:
+            raise AuthError("Usuário não encontrado.")
+        self._store.update_display_name(user_id, value)
+        updated = self._store.get_user(user_id)
+        assert updated is not None
+        return updated
+
+    async def change_password(self, user_id: str, current_password: str,
+                              new_password: str, keep_session_id: Optional[str] = None) -> None:
+        if len(new_password) < 6:
+            raise AuthError("A nova senha deve ter no mínimo 6 caracteres.")
+        user = self._store.get_user(user_id)
+        if user is None or not verify_password(user["password_hash"], current_password):
+            raise AuthError("A senha atual está incorreta.")
+        self._store.update_password_hash(user_id, hash_password(new_password))
+        if keep_session_id:
+            self._store.delete_user_sessions_except(user_id, keep_session_id)
+        else:
+            self._store.delete_user_sessions(user_id)
+
     # -- session restore (reconnection) -------------------------------------
 
     async def restore_session(self, session_id: str) -> Optional[Session]:

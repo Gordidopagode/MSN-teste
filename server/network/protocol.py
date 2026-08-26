@@ -42,6 +42,15 @@ CLIENT_COMMANDS: dict[str, tuple[str, ...]] = {
     "OPEN_CONVERSATION": ("username",),
     "SET_AVATAR": ("data", "filename", "mime"),
     "SET_CUSTOM_STATUS": ("message",),
+    "BEGIN_ATTACHMENT_UPLOAD": ("conversation_id", "filename", "mime", "size"),
+    "FINISH_ATTACHMENT_UPLOAD": ("upload_id",),
+    "ABORT_ATTACHMENT_UPLOAD": ("upload_id",),
+    "SEARCH_MESSAGES": ("conversation_id", "query"),
+    "LIST_PINNED_MESSAGES": ("conversation_id",),
+    "PIN_MESSAGE": ("conversation_id", "message_id"),
+    "UNPIN_MESSAGE": ("conversation_id", "message_id"),
+    "UPDATE_PROFILE": ("display_name",),
+    "CHANGE_PASSWORD": ("current_password", "new_password"),
     "LOGOUT": (),
 }
 
@@ -152,9 +161,55 @@ def parse_client_message(raw: Any) -> dict[str, Any]:
     elif command == "SET_CUSTOM_STATUS":
         _require_string(data, "message", nonempty=False)
 
+    elif command == "BEGIN_ATTACHMENT_UPLOAD":
+        _require_string(data, "conversation_id")
+        _require_string(data, "filename")
+        _require_string(data, "mime")
+        size = data["size"]
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            raise ProtocolError("Campo 'size' deve ser um inteiro positivo.")
+        if size > 512 * 1024 * 1024:
+            raise ProtocolError("Anexo muito grande.")
+        out["size"] = size
+
+    elif command in {"FINISH_ATTACHMENT_UPLOAD", "ABORT_ATTACHMENT_UPLOAD"}:
+        _require_string(data, "upload_id")
+
+    elif command == "SEARCH_MESSAGES":
+        _require_string(data, "conversation_id")
+        _require_string(data, "query")
+        if len(data["query"].strip()) > 200:
+            raise ProtocolError("A busca é muito longa.")
+        if "limit" in data:
+            limit = data["limit"]
+            if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+                raise ProtocolError("Campo 'limit' deve ser um inteiro positivo.")
+            out["limit"] = min(limit, 100)
+        if "before" in data:
+            _require_string(data, "before")
+            out["before"] = data["before"]
+
+    elif command in {"LIST_PINNED_MESSAGES", "PIN_MESSAGE", "UNPIN_MESSAGE"}:
+        _require_string(data, "conversation_id")
+        if command != "LIST_PINNED_MESSAGES":
+            _require_string(data, "message_id")
+
+    elif command == "UPDATE_PROFILE":
+        _require_string(data, "display_name")
+        if len(data["display_name"].strip()) > 64:
+            raise ProtocolError("O nome exibido é muito longo.")
+
+    elif command == "CHANGE_PASSWORD":
+        _require_string(data, "current_password")
+        _require_string(data, "new_password")
+        if len(data["new_password"]) > 1024:
+            raise ProtocolError("A nova senha é muito longa.")
+
     elif command == "SEND_MESSAGE":
         _require_string(data, "conversation_id")
         _require_string(data, "type")
+        if data["type"] == "attachment":
+            raise ProtocolError("Anexos devem ser enviados pelo fluxo de upload seguro.")
         if not isinstance(data["payload"], dict):
             raise ProtocolError("Campo 'payload' deve ser um objeto JSON.")
         if "message_id" in data:

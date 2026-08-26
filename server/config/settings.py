@@ -33,6 +33,11 @@ class ServerSettings:
         reset_token_ttl_minutes: int = 15,
         reset_max_attempts: int = 5,
         reset_requests_per_hour: int = 5,
+        attachment_max_bytes: int = 25 * 1024 * 1024,
+        attachment_chunk_bytes: int = 128 * 1024,
+        attachment_max_per_message: int = 3,
+        attachment_http_port: int = 0,
+        public_base_url: str = "",
     ) -> None:
         self.host = host
         self.port = port
@@ -51,6 +56,11 @@ class ServerSettings:
         self.reset_token_ttl_minutes = reset_token_ttl_minutes
         self.reset_max_attempts = reset_max_attempts
         self.reset_requests_per_hour = reset_requests_per_hour
+        self.attachment_max_bytes = attachment_max_bytes
+        self.attachment_chunk_bytes = attachment_chunk_bytes
+        self.attachment_max_per_message = attachment_max_per_message
+        self.attachment_http_port = attachment_http_port
+        self.public_base_url = public_base_url.rstrip("/")
 
     @staticmethod
     def _parse_allowed_origins(raw: Any) -> Optional[list[str]]:
@@ -92,6 +102,14 @@ class ServerSettings:
         reset_ttl = int(get("MSN_RESET_TOKEN_TTL_MINUTES", 15))
         reset_attempts = int(get("MSN_RESET_MAX_ATTEMPTS", 5))
         reset_requests = int(get("MSN_RESET_REQUESTS_PER_HOUR", 5))
+        attachment_max_bytes = int(get("MSN_ATTACHMENT_MAX_BYTES", 25 * 1024 * 1024))
+        attachment_chunk_bytes = int(get("MSN_ATTACHMENT_CHUNK_BYTES", 128 * 1024))
+        attachment_max_per_message = int(get("MSN_ATTACHMENT_MAX_PER_MESSAGE", 3))
+        attachment_http_port = int(get("MSN_ATTACHMENT_HTTP_PORT", port + 1))
+        if not (0 <= attachment_http_port <= 65535):
+            raise ValueError("MSN_ATTACHMENT_HTTP_PORT deve estar entre 0 e 65535.")
+        if attachment_http_port == port:
+            raise ValueError("MSN_ATTACHMENT_HTTP_PORT não pode ser igual a MSN_PORT.")
         for name, value in {
             "MSN_MAX_MESSAGE_LENGTH": max_msg,
             "MSN_MAX_USERNAME_LENGTH": max_username,
@@ -101,6 +119,9 @@ class ServerSettings:
             "MSN_RESET_TOKEN_TTL_MINUTES": reset_ttl,
             "MSN_RESET_MAX_ATTEMPTS": reset_attempts,
             "MSN_RESET_REQUESTS_PER_HOUR": reset_requests,
+            "MSN_ATTACHMENT_MAX_BYTES": attachment_max_bytes,
+            "MSN_ATTACHMENT_CHUNK_BYTES": attachment_chunk_bytes,
+            "MSN_ATTACHMENT_MAX_PER_MESSAGE": attachment_max_per_message,
         }.items():
             if value <= 0:
                 raise ValueError(f"{name} deve ser positivo")
@@ -128,4 +149,9 @@ class ServerSettings:
             reset_token_ttl_minutes=reset_ttl,
             reset_max_attempts=reset_attempts,
             reset_requests_per_hour=reset_requests,
+            attachment_max_bytes=attachment_max_bytes,
+            attachment_chunk_bytes=attachment_chunk_bytes,
+            attachment_max_per_message=attachment_max_per_message,
+            attachment_http_port=attachment_http_port,
+            public_base_url=str(get("MSN_PUBLIC_BASE_URL", "")),
         )

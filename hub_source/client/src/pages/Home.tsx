@@ -4,10 +4,11 @@
  * superfícies claras. Este arquivo contém apenas a composição da UI; rede e
  * estado do Messenger ficam em state/messenger.tsx e network/.
  */
-import { ChangeEvent, FormEvent, ReactNode, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   Bell,
+  Download,
   Check,
   ChevronDown,
   CircleHelp,
@@ -18,6 +19,8 @@ import {
   MessageCircle,
   MoreHorizontal,
   Paperclip,
+  Pin,
+  PinOff,
   Search,
   Send,
   Server,
@@ -38,7 +41,7 @@ import {
   Status,
   useMessenger,
 } from "@/state/messenger";
-import type { ProfilePayload } from "@/network/protocol";
+import type { MessagePayload, ProfilePayload } from "@/network/protocol";
 import type { ConnectionState } from "@/network/websocket";
 import messengerMark from "@/assets/messenger-mark_663c8cf5.png";
 import messengerOrbit from "@/assets/messenger-orbit_15ab62ba.png";
@@ -92,11 +95,13 @@ function IconButton({
   onClick,
   children,
   active = false,
+  disabled = false,
 }: {
   label: string;
   onClick?: () => void;
   children: ReactNode;
   active?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
@@ -105,6 +110,7 @@ function IconButton({
       aria-label={label}
       title={label}
       onClick={onClick}
+      disabled={disabled}
     >
       {children}
     </button>
@@ -555,6 +561,8 @@ function SettingsPanel({
   onClose,
   onAvatar,
   onCustomStatus,
+  onUpdateDisplayName,
+  onChangePassword,
   busy,
 }: {
   session: Identity;
@@ -565,9 +573,18 @@ function SettingsPanel({
   onClose: () => void;
   onAvatar: (file: File) => Promise<void>;
   onCustomStatus: (message: string) => Promise<void>;
+  onUpdateDisplayName: (displayName: string) => Promise<void>;
+  onChangePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   busy: boolean;
 }) {
+  const [tab, setTab] = useState<"account" | "hub">("account");
   const [customStatus, setCustomStatus] = useState(session.custom_status || "");
+  const [displayName, setDisplayName] = useState(session.displayName);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
+  const [theme, setTheme] = useState(() => window.localStorage.getItem("msn-hub-theme") || "light");
   const fileRef = useRef<HTMLInputElement>(null);
   const connectionCopy: Record<ConnectionState, string> = {
     connecting: "conectando",
@@ -584,14 +601,38 @@ function SettingsPanel({
   }
   async function saveStatus() {
     await onCustomStatus(customStatus.trim());
+    setSettingsMessage("Status atualizado.");
   }
+  async function saveDisplayName() {
+    await onUpdateDisplayName(displayName.trim());
+    setSettingsMessage("Nome exibido atualizado.");
+  }
+  async function savePassword() {
+    if (newPassword !== confirmPassword) {
+      setSettingsMessage("As novas senhas não coincidem.");
+      return;
+    }
+    await onChangePassword(currentPassword, newPassword);
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+    setSettingsMessage("Senha atualizada.");
+  }
+  function applyTheme(nextTheme: string) {
+    setTheme(nextTheme);
+    window.localStorage.setItem("msn-hub-theme", nextTheme);
+    document.documentElement.dataset.msnTheme = nextTheme;
+  }
+  useEffect(() => {
+    document.documentElement.dataset.msnTheme = theme;
+  }, [theme]);
   return (
     <aside className="settings-panel profile-panel" aria-label="Perfil e configurações">
       <div className="settings-heading"><div><span className="eyebrow">perfil</span><h2>Meu espaço</h2></div><IconButton label="Fechar configurações" onClick={onClose}><X size={15} /></IconButton></div>
       <div className="profile-editor">
         <div className="profile-avatar profile-avatar-small">{session.avatar_data ? <img src={session.avatar_data} alt="Foto de perfil" /> : ownInitials}<StatusDot status={status} /></div>
         <button className="text-button" type="button" onClick={() => fileRef.current?.click()} disabled={busy}>Alterar foto de perfil</button>
-        <input ref={fileRef} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => void upload(event)} />
+        <input ref={fileRef} className="visually-hidden" type="file" accept="image/*" onChange={(event) => void upload(event)} />
       </div>
       <div className="settings-list">
         <div className="settings-row"><Server size={15} /><span><small>Endereço do servidor</small><strong>{serverUrl}</strong></span></div>
@@ -599,8 +640,29 @@ function SettingsPanel({
         <div className="settings-row"><UserRound size={15} /><span><small>Nome de usuário</small><strong>{session.username}</strong></span></div>
         <div className="settings-row"><ShieldCheck size={15} /><span><small>Nome exibido</small><strong>{session.displayName}</strong></span></div>
       </div>
-      <label className="field compact-field"><span className="field-label">Status personalizado</span><input value={customStatus} maxLength={200} onChange={(event) => setCustomStatus(event.target.value)} placeholder="ex.: Construindo meu MSN" /></label>
-      <div className="profile-actions"><button className="primary-button" type="button" onClick={() => void saveStatus()} disabled={busy}>Salvar status</button><button className="text-button" type="button" onClick={() => { setCustomStatus(""); void onCustomStatus(""); }} disabled={busy}>Limpar</button></div>
+      <div className="settings-tabs" role="tablist" aria-label="Categorias de configuração">
+        <button className={tab === "account" ? "is-active" : ""} type="button" onClick={() => setTab("account")} role="tab" aria-selected={tab === "account"}>Minha conta</button>
+        <button className={tab === "hub" ? "is-active" : ""} type="button" onClick={() => setTab("hub")} role="tab" aria-selected={tab === "hub"}>Hub</button>
+      </div>
+      {tab === "account" ? (
+        <div className="settings-category" role="tabpanel">
+          <label className="field compact-field"><span className="field-label">Nome exibido</span><input value={displayName} maxLength={64} onChange={(event) => setDisplayName(event.target.value)} /></label>
+          <button className="primary-button" type="button" onClick={() => void saveDisplayName()} disabled={busy}>Salvar nome</button>
+          <label className="field compact-field"><span className="field-label">Status personalizado</span><input value={customStatus} maxLength={200} onChange={(event) => setCustomStatus(event.target.value)} placeholder="ex.: Construindo meu MSN" /></label>
+          <div className="profile-actions"><button className="primary-button" type="button" onClick={() => void saveStatus()} disabled={busy}>Salvar status</button><button className="text-button" type="button" onClick={() => { setCustomStatus(""); void onCustomStatus(""); }} disabled={busy}>Limpar</button></div>
+          <div className="settings-subheading"><KeyRound size={14} /><strong>Trocar senha</strong></div>
+          <input className="settings-input" type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} placeholder="Senha atual" />
+          <input className="settings-input" type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} placeholder="Nova senha" />
+          <input className="settings-input" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Confirmar nova senha" />
+          {settingsMessage && <div className="inline-success" role="status">{settingsMessage}</div>}
+          <button className="primary-button" type="button" onClick={() => void savePassword()} disabled={busy}>Atualizar senha</button>
+        </div>
+      ) : (
+        <div className="settings-category" role="tabpanel">
+          <label className="field compact-field"><span className="field-label">Tema do Hub</span><select value={theme} onChange={(event) => applyTheme(event.target.value)}><option value="light">Claro</option><option value="dim">Azul suave</option><option value="dark">Escuro</option></select></label>
+          <p className="empty-panel-note">As preferências do Hub ficam neste navegador e não alteram sua conta.</p>
+        </div>
+      )}
       <button className="logout-button" type="button" onClick={onLogout} disabled={busy}><LogOut size={15} /> {busy ? "Saindo..." : "Sair do Messenger"}</button>
     </aside>
   );
@@ -653,41 +715,53 @@ function FriendsPanel({
     <aside className="settings-panel friends-panel" aria-label="Amigos">
       <div className="settings-heading"><div><span className="eyebrow">contatos</span><h2>Amigos</h2></div><IconButton label="Fechar amigos" onClick={onClose}><X size={15} /></IconButton></div>
       <form className="friend-search" onSubmit={(event) => void submitSearch(event)}>
-        <div className="search-box"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Pesquisar por username" aria-label="Pesquisar usuário" /></div>
+        <div className="search-box"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Pesquisar por nome ou @username" aria-label="Pesquisar usuário por nome ou username" /></div>
         <button className="primary-button" type="submit" disabled={searching}>{searching ? "Buscando..." : "Pesquisar"}</button>
       </form>
       {message && <div className="inline-success" role="status">{message}</div>}
-      {results.length > 0 && <div className="friend-section"><span className="friend-section-title">Resultados</span>{results.map((user) => <div className="friend-row" key={user.user_id}><Avatar initials={friendInitials({ display_name: user.display_name, username: user.username })} color="#84b9d8" status="offline" avatarData={user.avatar_data} /><span className="friend-copy"><strong>{user.display_name}</strong><small>@{user.username}</small></span><button className="small-button" type="button" onClick={() => void add(user.username)}>Adicionar</button></div>)}</div>}
+      {results.length > 0 && <div className="friend-section"><span className="friend-section-title">Resultados</span>{results.map((user) => <div className="friend-row" key={user.user_id}><Avatar initials={friendInitials({ display_name: user.display_name, username: user.username })} color="#84b9d8" status={user.presence?.status || "offline"} avatarData={user.avatar_data} /><span className="friend-copy"><strong>{user.display_name}</strong><small><StatusDot status={user.presence?.status || "offline"} /> @{user.username}{user.presence?.custom_status ? ` · ${user.presence.custom_status}` : ""}</small></span><button className="small-button" type="button" onClick={() => void add(user.username)}>Adicionar</button></div>)}</div>}
       <div className="friend-section"><span className="friend-section-title">Solicitações pendentes <b>{pending.length}</b></span>{pending.length === 0 ? <p className="empty-panel-note">Nenhuma solicitação pendente.</p> : pending.map((friend) => <div className="friend-row" key={friend.friendship_id}><Avatar initials={friendInitials(friend)} color="#d8b4a1" status={friend.status} avatarData={friend.avatar_data} /><span className="friend-copy"><strong>{friend.display_name}</strong><small>{friend.incoming ? "quer ser seu amigo" : "aguardando resposta"}</small></span>{friend.incoming ? <span className="friend-actions"><button className="small-button" type="button" onClick={() => void respond(friend, "accept")}>Aceitar</button><button className="small-button muted" type="button" onClick={() => void respond(friend, "decline")}>Recusar</button></span> : <span className="friend-waiting">Pendente</span>}</div>)}</div>
       <div className="friend-section"><span className="friend-section-title">Minha lista <b>{accepted.length}</b></span>{accepted.length === 0 ? <p className="empty-panel-note">Você ainda não tem amigos.</p> : accepted.map((friend) => <div className="friend-row" key={friend.friendship_id}><Avatar initials={friendInitials(friend)} color="#b7c58b" status={friend.status} avatarData={friend.avatar_data} /><span className="friend-copy"><strong>{friend.display_name}</strong><small><StatusDot status={friend.status} /> {statusCopy[friend.status]}{friend.custom_status ? ` · ${friend.custom_status}` : ""}</small></span><span className="friend-actions"><button className="small-button" type="button" onClick={() => void openConversation(friend.username)}>Conversar</button><button className="small-button muted" type="button" onClick={() => void removeFriend(friend.friendship_id)}>Remover</button></span></div>)}</div>
     </aside>
   );
 }
 
-function GroupComposer({ onCreate, onClose, busy }: { onCreate: (name: string, participants: string[]) => Promise<void>; onClose: () => void; busy: boolean }) {
+function GroupComposer({ friends, searchUsers, onCreate, onClose, busy }: { friends: Friend[]; searchUsers: (query: string) => Promise<ProfilePayload[]>; onCreate: (name: string, participants: string[]) => Promise<void>; onClose: () => void; busy: boolean }) {
   const [name, setName] = useState("");
-  const [participants, setParticipants] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<ProfilePayload[]>([]);
+  const [searching, setSearching] = useState(false);
+  const accepted = friends.filter((friend) => friend.friendship_status === "accepted");
+  async function searchOthers() {
+    if (!query.trim()) { setResults([]); return; }
+    setSearching(true);
+    try { setResults(await searchUsers(query.trim())); } finally { setSearching(false); }
+  }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const usernames = participants.split(",").map((value) => value.trim()).filter(Boolean);
     if (!name.trim()) { setValidationError("Informe um nome para o grupo."); return; }
-    if (usernames.length === 0) { setValidationError("Informe pelo menos um participante."); return; }
+    if (selected.length === 0) { setValidationError("Selecione pelo menos um participante."); return; }
     setValidationError(null);
     try {
-      await onCreate(name.trim(), usernames);
+      await onCreate(name.trim(), selected);
       onClose();
     } catch {
       // The provider already exposes the server error in the Hub banner.
     }
   }
+  function toggle(username: string) {
+    setSelected((items) => items.includes(username) ? items.filter((item) => item !== username) : [...items, username]);
+  }
   return (
     <form className="group-composer" onSubmit={(event) => void submit(event)}>
       <div className="settings-heading"><div><span className="eyebrow">nova conversa</span><h2>Criar grupo</h2></div><IconButton label="Fechar" onClick={onClose}><X size={15} /></IconButton></div>
       <Field label="Nome do grupo" icon={<UsersRound size={15} />} placeholder="ex.: Equipe" value={name} onChange={setName} />
-      <Field label="Participantes" icon={<UserPlus size={15} />} placeholder="nomes separados por vírgula" value={participants} onChange={setParticipants} />
+      <div className="field compact-field"><span className="field-label">Escolha os amigos</span><div className="friend-picker">{accepted.length === 0 ? <p className="empty-panel-note">Nenhum amigo aceito ainda.</p> : accepted.map((friend) => <label className="friend-picker-row" key={friend.user_id}><input type="checkbox" checked={selected.includes(friend.username)} onChange={() => toggle(friend.username)} /><span>{friend.display_name}</span><small>@{friend.username}</small></label>)}</div></div>
+      <div className="field compact-field"><span className="field-label">Adicionar outra pessoa por nome ou @username</span><div className="friend-search group-search"><div className="search-box"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar participante" /></div><button className="small-button" type="button" onClick={() => void searchOthers()} disabled={searching}>{searching ? "..." : "Buscar"}</button></div>{results.length > 0 && <div className="friend-picker">{results.filter((user) => !accepted.some((friend) => friend.user_id === user.user_id)).map((user) => <label className="friend-picker-row" key={user.user_id}><input type="checkbox" checked={selected.includes(user.username)} onChange={() => toggle(user.username)} /><span><StatusDot status={user.presence?.status || "offline"} /> {user.display_name}</span><small>@{user.username}</small></label>)}</div>}</div>
       {validationError && <div className="form-error" role="alert">{validationError}</div>}
-      <button className="primary-button" type="submit" disabled={busy}><UsersRound size={15} /> {busy ? "Criando..." : "Criar grupo"}</button>
+      <button className="primary-button" type="submit" disabled={busy || selected.length === 0}><UsersRound size={15} /> {busy ? "Criando..." : "Criar grupo"}</button>
     </form>
   );
 }
@@ -705,12 +779,30 @@ function ChatEmpty({ onNewGroup }: { onNewGroup: () => void }) {
   );
 }
 
-function ChatView({ conversation, onSend, onLoadHistory }: { conversation: Conversation; onSend: (text: string) => Promise<void>; onLoadHistory: (id: string) => Promise<void> }) {
+function messageTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+}
+
+function messagePreview(message: MessagePayload): string {
+  if (typeof message.payload?.content === "string") return message.payload.content;
+  return message.payload?.attachment?.original_name ? `Anexo: ${message.payload.attachment.original_name}` : `[${message.type}]`;
+}
+
+function ChatView({ conversation, onSend, onLoadHistory, onSendAttachment, attachmentProgress, onSearchMessages, onPinMessage, onListPinnedMessages }: { conversation: Conversation; onSend: (text: string) => Promise<void>; onLoadHistory: (id: string) => Promise<void>; onSendAttachment: (id: string, file: File) => Promise<void>; attachmentProgress: { received: number; size: number } | null; onSearchMessages: (id: string, query: string) => Promise<MessagePayload[]>; onPinMessage: (id: string, messageId: string, pinned: boolean) => Promise<void>; onListPinnedMessages: (id: string) => Promise<MessagePayload[]> }) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [searchResults, setSearchResults] = useState<MessagePayload[]>([]);
+  const [pinnedOpen, setPinnedOpen] = useState(false);
+  const [pinnedMessages, setPinnedMessages] = useState<MessagePayload[]>([]);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [attachmentNote, setAttachmentNote] = useState<string | null>(null);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   async function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -724,26 +816,60 @@ function ChatView({ conversation, onSend, onLoadHistory }: { conversation: Conve
     }
   }
 
+  async function submitSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!searchTerm.trim()) { setSearchResults([]); return; }
+    setSearchResults(await onSearchMessages(conversation.id, searchTerm.trim()));
+  }
+  async function togglePinned() {
+    if (pinnedOpen) { setPinnedOpen(false); return; }
+    setPinnedMessages(await onListPinnedMessages(conversation.id));
+    setPinnedOpen(true);
+  }
+  function focusMessage(messageId: string) {
+    setHighlightedMessageId(messageId);
+    window.setTimeout(() => document.getElementById(`message-${messageId}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 0);
+    window.setTimeout(() => setHighlightedMessageId((current) => current === messageId ? null : current), 2200);
+  }
+  async function upload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setAttachmentBusy(true);
+    try {
+      await onSendAttachment(conversation.id, file);
+      setAttachmentNote(`Anexo “${file.name}” enviado.`);
+    } finally {
+      setAttachmentBusy(false);
+    }
+  }
+
   return (
     <section className="chat-pane" aria-label={`Conversa com ${conversation.name}`}>
       <header className="chat-header">
         <div className="chat-person"><Avatar initials={conversation.initials} color={conversation.color} status={conversation.status} group={conversation.kind === "group"} avatarData={conversation.avatarData} /><div><h2>{conversation.name}</h2><p><StatusDot status={conversation.status} /> {statusCopy[conversation.status]}</p>{conversation.customStatus && <small className="chat-custom-status">{conversation.customStatus}</small>}</div></div>
-        <div className="chat-actions"><IconButton label="Atualizar histórico" onClick={() => void onLoadHistory(conversation.id)}><Search size={16} /></IconButton><span className="chat-more-wrap"><IconButton label="Mais opções" onClick={() => setMoreOpen((open) => !open)} active={moreOpen}><MoreHorizontal size={17} /></IconButton>{moreOpen && <span className="chat-menu"><button type="button" onClick={() => void onLoadHistory(conversation.id)}>Atualizar histórico</button><button type="button" onClick={() => { void navigator.clipboard?.writeText(conversation.id); setMoreOpen(false); }}>Copiar ID da conversa</button></span>}</span></div>
+        <div className="chat-actions"><IconButton label="Buscar mensagens" onClick={() => setSearchOpen((open) => !open)} active={searchOpen}><Search size={16} /></IconButton><IconButton label="Ver mensagens fixadas" onClick={() => void togglePinned()} active={pinnedOpen}><Pin size={15} /></IconButton><span className="chat-more-wrap"><IconButton label="Mais opções" onClick={() => setMoreOpen((open) => !open)} active={moreOpen}><MoreHorizontal size={17} /></IconButton>{moreOpen && <span className="chat-menu"><button type="button" onClick={() => void onLoadHistory(conversation.id)}>Atualizar histórico</button><button type="button" onClick={() => { void navigator.clipboard?.writeText(conversation.id); setMoreOpen(false); }}>Copiar ID da conversa</button></span>}</span></div>
       </header>
       <div className="chat-context"><MessageCircle size={14} /><span>histórico sincronizado do servidor</span><span className="context-line" /></div>
+      {searchOpen && <form className="chat-search" onSubmit={(event) => void submitSearch(event)}><Search size={14} /><input aria-label="Buscar mensagens nesta conversa" placeholder="Buscar nesta conversa" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} /><button className="small-button" type="submit">Buscar</button></form>}
+      {searchResults.length > 0 && <div className="chat-results"><strong>Resultados encontrados: {searchResults.length}</strong>{searchResults.map((item) => <button type="button" key={item.message_id} onClick={() => focusMessage(item.message_id)}>{messagePreview(item)} <time>{messageTime(item.timestamp)}</time></button>)}</div>}
+      {pinnedOpen && <div className="chat-results pinned-results"><strong>Mensagens fixadas: {pinnedMessages.length}</strong>{pinnedMessages.length === 0 ? <span>Nenhuma mensagem fixada.</span> : pinnedMessages.map((item) => <button type="button" key={item.message_id} onClick={() => { setPinnedOpen(false); focusMessage(item.message_id); }}>{messagePreview(item)} <time>{messageTime(item.timestamp)}</time></button>)}</div>}
       <div className="chat-messages">
         {conversation.messages.length === 0 ? (
           <div className="empty-message-note">Nenhuma mensagem nesta conversa ainda.</div>
         ) : conversation.messages.map((message: ChatMessage) => (
-          <div className={`message-row ${message.author === "me" ? "mine" : ""}`} key={message.id}>
+          <div className={`message-row ${message.author === "me" ? "mine" : ""} ${highlightedMessageId === message.id ? "is-highlighted" : ""}`} id={`message-${message.id}`} key={message.id}>
             <div className="message-meta"><strong>{message.author === "me" ? "Você" : message.authorName}</strong><time>{message.time}</time></div>
-            <div className="message-bubble">{message.text}</div>
+            <div className="message-bubble">{message.attachment ? <span className="attachment-card">{message.attachment.mime_type.startsWith("image/") && message.attachment.download_url && <img src={message.attachment.download_url} alt={message.attachment.original_name} />}<span><strong>{message.attachment.original_name}</strong><small>{Math.ceil(message.attachment.size / 1024)} KB · {message.attachment.mime_type}</small><a href={message.attachment.download_url} target="_blank" rel="noreferrer"><Download size={13} /> Baixar</a></span></span> : message.text}</div>
+            <button className={`message-pin ${message.isPinned ? "is-pinned" : ""}`} type="button" aria-label={message.isPinned ? "Desafixar mensagem" : "Fixar mensagem"} title={message.isPinned ? "Desafixar mensagem" : "Fixar mensagem"} onClick={() => void onPinMessage(conversation.id, message.id, !message.isPinned)}>{message.isPinned ? <PinOff size={12} /> : <Pin size={12} />}</button>
           </div>
         ))}
       </div>
+      {attachmentBusy && attachmentProgress && <div className="attachment-note" role="status">Enviando anexo… {Math.round((attachmentProgress.received / Math.max(attachmentProgress.size, 1)) * 100)}%</div>}
       {attachmentNote && <div className="attachment-note" role="status">{attachmentNote}<button type="button" onClick={() => setAttachmentNote(null)} aria-label="Fechar aviso"><X size={12} /></button></div>}
+      <input ref={fileRef} className="visually-hidden" type="file" onChange={(event) => void upload(event)} />
       <form className="message-composer" onSubmit={(event) => void submitMessage(event)}>
-        <div className="composer-tools"><IconButton label="Anexar arquivo" onClick={() => setAttachmentNote("Anexos ainda não fazem parte do protocolo de mensagens deste Hub.")}><Paperclip size={15} /></IconButton><span className="emoji-wrap"><IconButton label="Adicionar emoji" onClick={() => setEmojiOpen((open) => !open)} active={emojiOpen}><Smile size={15} /></IconButton>{emojiOpen && <span className="emoji-picker">{["😀", "😂", "😉", "❤️", "👍", "🎸", "🌙", "✨"].map((emoji) => <button type="button" key={emoji} onClick={() => { setDraft((current) => `${current}${emoji}`); setEmojiOpen(false); }}>{emoji}</button>)}</span>}</span></div>
+        <div className="composer-tools"><IconButton label="Anexar arquivo" onClick={() => fileRef.current?.click()} disabled={attachmentBusy || sending}><Paperclip size={15} /></IconButton><span className="emoji-wrap"><IconButton label="Adicionar emoji" onClick={() => setEmojiOpen((open) => !open)} active={emojiOpen}><Smile size={15} /></IconButton>{emojiOpen && <span className="emoji-picker">{["😀", "😂", "😉", "❤️", "👍", "🎸", "🌙", "✨"].map((emoji) => <button type="button" key={emoji} onClick={() => { setDraft((current) => `${current}${emoji}`); setEmojiOpen(false); }}>{emoji}</button>)}</span>}</span></div>
         <input aria-label="Digite uma mensagem" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Digite uma mensagem..." disabled={sending} />
         <button className="send-button" type="submit" disabled={sending}><Send size={15} /> {sending ? "Enviando" : "Enviar"}</button>
       </form>
@@ -773,8 +899,17 @@ function Hub() {
     openConversation,
     setAvatar,
     setCustomStatus,
+    sendAttachment,
+    attachmentProgress,
+    searchMessages,
+    pinMessage,
+    listPinnedMessages,
+    updateDisplayName,
+    changePassword,
     reconnectNow,
     clearError,
+    notifications,
+    dismissNotification,
   } = useMessenger();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -824,6 +959,7 @@ function Hub() {
         {error && (
           <div className="hub-error" role="alert"><span>{error}</span><button type="button" onClick={clearError} aria-label="Fechar aviso"><X size={14} /></button></div>
         )}
+        {notifications.length > 0 && <div className="notification-stack" aria-live="polite">{notifications.map((notification) => <button className="notification-card" type="button" key={notification.id} onClick={() => { if (notification.conversationId) setSelectedId(notification.conversationId); dismissNotification(notification.id); }}><Bell size={14} /><span><strong>{notification.title}</strong><small>{notification.body}</small></span><X size={12} /></button>)}</div>}
         <div className="hub-body">
           <aside className="profile-rail">
             <div className="rail-profile">
@@ -843,9 +979,9 @@ function Hub() {
               <div className="rail-server"><Server size={14} /><span><small>servidor</small><strong>{serverUrl}</strong></span></div>
               <button className="rail-logout" type="button" onClick={() => void logout()} disabled={busy}><LogOut size={14} /> Sair</button>
             </div>
-            {settingsOpen && <SettingsPanel session={session} serverUrl={serverUrl} connectionState={connectionState} status={status} onLogout={() => void logout()} onClose={() => setSettingsOpen(false)} onAvatar={setAvatar} onCustomStatus={setCustomStatus} busy={busy} />}
+            {settingsOpen && <SettingsPanel session={session} serverUrl={serverUrl} connectionState={connectionState} status={status} onLogout={() => void logout()} onClose={() => setSettingsOpen(false)} onAvatar={setAvatar} onCustomStatus={setCustomStatus} onUpdateDisplayName={updateDisplayName} onChangePassword={changePassword} busy={busy} />}
             {friendsOpen && <FriendsPanel friends={friends} searchUsers={searchUsers} sendFriendRequest={sendFriendRequest} respondFriendRequest={respondFriendRequest} removeFriend={removeFriend} openConversation={openConversation} onClose={() => setFriendsOpen(false)} busy={busy} />}
-            {groupOpen && <GroupComposer onCreate={createGroup} onClose={() => setGroupOpen(false)} busy={busy} />}
+            {groupOpen && <GroupComposer friends={friends} searchUsers={searchUsers} onCreate={createGroup} onClose={() => setGroupOpen(false)} busy={busy} />}
           </aside>
 
           <section className="conversation-pane" aria-label="Conversas">
@@ -861,7 +997,7 @@ function Hub() {
           </section>
 
           {selectedConversation ? (
-            <ChatView conversation={selectedConversation} onSend={(text) => sendMessage(selectedConversation.id, text)} onLoadHistory={requestHistory} />
+            <ChatView conversation={selectedConversation} onSend={(text) => sendMessage(selectedConversation.id, text)} onLoadHistory={requestHistory} onSendAttachment={sendAttachment} attachmentProgress={attachmentProgress} onSearchMessages={searchMessages} onPinMessage={pinMessage} onListPinnedMessages={listPinnedMessages} />
           ) : <ChatEmpty onNewGroup={openGroup} />}
         </div>
         <footer className="connection-bar">

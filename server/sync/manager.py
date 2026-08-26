@@ -32,7 +32,8 @@ SYNC_PROTOCOL_VERSION = "1.1.0"
 class SyncManager:
     def __init__(self, settings: Any, sessions: Any, presence: Any,
                  conversations: Any, messages: Any, store: Any,
-                 friendships: Any) -> None:
+                 friendships: Any, attachments: Any = None,
+                 attachment_url_builder: Any = None) -> None:
         self._settings = settings
         self._sessions = sessions
         self._presence = presence
@@ -40,6 +41,30 @@ class SyncManager:
         self._messages = messages
         self._store = store
         self._friendships = friendships
+        self._attachments = attachments
+        self._attachment_url_builder = attachment_url_builder
+
+    def hydrate_message(self, message: dict[str, Any], user_id: str) -> dict[str, Any]:
+        if message.get("type") != "attachment" or self._attachments is None:
+            return message
+        payload = message.get("payload") or {}
+        metadata = payload.get("attachment") if isinstance(payload, dict) else None
+        if not isinstance(metadata, dict) or not metadata.get("attachment_id"):
+            return message
+        record = self._attachments.get_attachment(metadata["attachment_id"])
+        if record is None:
+            return message
+        public = {
+            **metadata,
+            "original_name": record["original_name"],
+            "mime_type": record["mime_type"],
+            "size": record["size"],
+            "sha256": record["sha256"],
+            "created_at": record["created_at"],
+        }
+        if self._attachment_url_builder is not None:
+            public["download_url"] = self._attachment_url_builder(record["attachment_id"], user_id)
+        return {**message, "payload": {**payload, "attachment": public}}
 
     def build_sync(self, session_id: str, user_id: str,
                    history_limit: int = 50) -> dict[str, Any]:
@@ -66,9 +91,12 @@ class SyncManager:
         history: dict[str, list[dict[str, Any]]] = {}
         for conv in conversations:
             try:
-                history[conv.conversation_id] = self._messages.get_history(
-                    conv.conversation_id, user_id, limit=history_limit
-                )
+                history[conv.conversation_id] = [
+                    self.hydrate_message(message, user_id)
+                    for message in self._messages.get_history(
+                        conv.conversation_id, user_id, limit=history_limit
+                    )
+                ]
             except Exception:  # never let one broken conversation poison sync
                 log.exception("Skipping history for %s during sync", conv.conversation_id)
                 history[conv.conversation_id] = []

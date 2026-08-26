@@ -120,6 +120,33 @@ class Persistence:
         payload TEXT NOT NULL,
         metadata TEXT NOT NULL DEFAULT '{}'
     );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_conversation_time
+        ON messages(conversation_id, timestamp DESC);
+
+    CREATE TABLE IF NOT EXISTS attachments (
+        attachment_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+        owner_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        message_id TEXT REFERENCES messages(message_id) ON DELETE SET NULL,
+        original_name TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        storage_ref TEXT UNIQUE NOT NULL,
+        sha256 TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_attachments_conversation
+        ON attachments(conversation_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS pinned_messages (
+        conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+        message_id TEXT NOT NULL REFERENCES messages(message_id) ON DELETE CASCADE,
+        pinned_by TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        pinned_at TEXT NOT NULL,
+        PRIMARY KEY (conversation_id, message_id)
+    );
     """
 
     def __init__(self, db_path: Path | str) -> None:
@@ -209,6 +236,22 @@ class Persistence:
                 "UPDATE users SET avatar_data = ?, avatar_mime = ? WHERE user_id = ?",
                 (avatar_data, avatar_mime, user_id),
             )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def update_display_name(self, user_id: str, display_name: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute("UPDATE users SET display_name = ? WHERE user_id = ?", (display_name, user_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def update_password_hash(self, user_id: str, password_hash: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute("UPDATE users SET password_hash = ? WHERE user_id = ?", (password_hash, user_id))
             conn.commit()
         finally:
             conn.close()
@@ -568,6 +611,7 @@ class Persistence:
             msg = dict(row)
             msg["payload"] = json.loads(msg["payload"])
             msg["metadata"] = json.loads(msg["metadata"])
+            msg["is_pinned"] = self._message_is_pinned(conn, message_id)
             return msg
         finally:
             conn.close()
@@ -584,6 +628,14 @@ class Persistence:
         conn = self._conn()
         try:
             conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_user_sessions_except(self, user_id: str, session_id: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute("DELETE FROM sessions WHERE user_id = ? AND session_id != ?", (user_id, session_id))
             conn.commit()
         finally:
             conn.close()
@@ -711,7 +763,125 @@ class Persistence:
         finally:
             conn.close()
 
+    # -- attachments ----------------------------------------------------------
+
+    def create_attachment(self, attachment: dict[str, Any]) -> None:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "INSERT INTO attachments "
+                "(attachment_id, conversation_id, owner_id, message_id, original_name, "
+                "mime_type, size, storage_ref, sha256, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    attachment["attachment_id"], attachment["conversation_id"],
+                    attachment["owner_id"], attachment.get("message_id"),
+                    attachment["original_name"], attachment["mime_type"],
+                    attachment["size"], attachment["storage_ref"],
+                    attachment["sha256"], attachment["created_at"],
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def link_attachment_message(self, attachment_id: str, message_id: str) -> None:
+        conn = self._conn()
+        try:
+            conn.execute("UPDATE attachments SET message_id = ? WHERE attachment_id = ?", (message_id, attachment_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_attachment(self, attachment_id: str) -> Optional[dict[str, Any]]:
+        conn = self._conn()
+        try:
+            row = conn.execute("SELECT * FROM attachments WHERE attachment_id = ?", (attachment_id,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    # -- message search and pins --------------------------------------------
+
+    @staticmethod
+    def _message_is_pinned(conn: sqlite3.Connection, message_id: str) -> bool:
+        row = conn.execute("SELECT 1 FROM pinned_messages WHERE message_id = ?", (message_id,)).fetchone()
+        return row is not None
+
+    def pin_message(self, conversation_id: str, message_id: str, user_id: str, pinned_at: str) -> bool:
+        conn = self._conn()
+        try:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO pinned_messages (conversation_id, message_id, pinned_by, pinned_at) "
+                "SELECT ?, message_id, ?, ? FROM messages WHERE message_id = ? AND conversation_id = ?",
+                (conversation_id, user_id, pinned_at, message_id, conversation_id),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    def unpin_message(self, conversation_id: str, message_id: str) -> bool:
+        conn = self._conn()
+        try:
+            cursor = conn.execute(
+                "DELETE FROM pinned_messages WHERE conversation_id = ? AND message_id = ?",
+                (conversation_id, message_id),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    def list_pinned_messages(self, conversation_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT m.*, p.pinned_by, p.pinned_at FROM messages m "
+                "JOIN pinned_messages p ON p.message_id = m.message_id "
+                "WHERE p.conversation_id = ? ORDER BY p.pinned_at DESC LIMIT ?",
+                (conversation_id, limit),
+            ).fetchall()
+            return [self._decode_message_row(row, is_pinned=True) for row in rows]
+        finally:
+            conn.close()
+
+    def search_messages(self, conversation_id: str, query: str, limit: int = 50,
+                        before: Optional[str] = None) -> list[dict[str, Any]]:
+        term = query.strip().lower()
+        if not term:
+            return []
+        conn = self._conn()
+        try:
+            pattern = f"%{term}%"
+            if before:
+                rows = conn.execute(
+                    "SELECT * FROM messages WHERE conversation_id = ? AND timestamp < ? "
+                    "AND LOWER(payload) LIKE ? ORDER BY timestamp DESC LIMIT ?",
+                    (conversation_id, before, pattern, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM messages WHERE conversation_id = ? AND LOWER(payload) LIKE ? "
+                    "ORDER BY timestamp DESC LIMIT ?",
+                    (conversation_id, pattern, limit),
+                ).fetchall()
+            return [self._decode_message_row(row) for row in rows]
+        finally:
+            conn.close()
+
     # -- messages ------------------------------------------------------------
+
+    @staticmethod
+    def _decode_message_row(row: sqlite3.Row, is_pinned: Optional[bool] = None) -> dict[str, Any]:
+        msg = dict(row)
+        msg["payload"] = json.loads(msg["payload"])
+        msg["metadata"] = json.loads(msg["metadata"])
+        if is_pinned is None:
+            msg["is_pinned"] = False
+        else:
+            msg["is_pinned"] = is_pinned
+        return msg
 
     def save_message(self, message: dict[str, Any]) -> bool:
         """Persist a message. INSERT OR IGNORE guarantees idempotency;
@@ -764,9 +934,8 @@ class Persistence:
                 ).fetchall()
             out = []
             for r in rows:
-                msg = dict(r)
-                msg["payload"] = json.loads(msg["payload"])
-                msg["metadata"] = json.loads(msg["metadata"])
+                msg = self._decode_message_row(r)
+                msg["is_pinned"] = self._message_is_pinned(conn, msg["message_id"])
                 msg["is_group"] = bool(
                     conn.execute(
                         "SELECT is_group FROM conversations WHERE conversation_id = ?",

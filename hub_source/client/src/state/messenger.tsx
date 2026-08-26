@@ -12,6 +12,11 @@ import { MSN_SERVER_URL } from "@/network/config";
 import {
   AuthPayload,
   RegistrationPayload,
+  AttachmentPayload,
+  AttachmentUploadReadyPayload,
+  AttachmentUploadCompletePayload,
+  MessageSearchPayload,
+  MessagePinnedPayload,
   ConversationCreatedPayload,
   FriendshipPayload,
   FriendshipsUpdatedPayload,
@@ -52,12 +57,23 @@ export interface Identity {
 
 export type Friend = FriendshipPayload;
 
+export interface NotificationItem {
+  id: string;
+  kind: "message" | "connection";
+  title: string;
+  body: string;
+  conversationId?: string;
+}
+
 export interface ChatMessage {
   id: string;
   author: "them" | "me";
   authorName: string;
   text: string;
   time: string;
+  type: string;
+  isPinned: boolean;
+  attachment?: AttachmentPayload;
 }
 
 export interface Conversation {
@@ -116,7 +132,16 @@ export interface MessengerContextValue {
   openConversation: (username: string) => Promise<void>;
   setAvatar: (file: File) => Promise<void>;
   setCustomStatus: (message: string) => Promise<void>;
+  sendAttachment: (conversationId: string, file: File) => Promise<void>;
+  searchMessages: (conversationId: string, query: string, before?: string) => Promise<MessagePayload[]>;
+  pinMessage: (conversationId: string, messageId: string, pinned: boolean) => Promise<void>;
+  listPinnedMessages: (conversationId: string) => Promise<MessagePayload[]>;
+  updateDisplayName: (displayName: string) => Promise<void>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   reconnectNow: () => Promise<void>;
+  notifications: NotificationItem[];
+  attachmentProgress: { received: number; size: number } | null;
+  dismissNotification: (id: string) => void;
   clearError: () => void;
 }
 
@@ -146,6 +171,9 @@ function colorFor(id: string): string {
 
 function textFromMessage(message: MessagePayload): string {
   if (typeof message.payload?.content === "string") return message.payload.content;
+  if (message.type === "attachment" && message.payload?.attachment?.original_name) {
+    return `Anexo: ${message.payload.attachment.original_name}`;
+  }
   return `[${message.type}]`;
 }
 
@@ -178,6 +206,9 @@ function mapMessage(
         : sender?.displayName || sender?.username || "Contato",
     text: textFromMessage(message),
     time: displayTime(message.timestamp),
+    type: message.type,
+    isPinned: Boolean(message.is_pinned),
+    attachment: message.payload?.attachment,
   };
 }
 
@@ -268,6 +299,8 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
   const [friends, setFriends] = useState<Friend[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [knownUsers, setKnownUsers] = useState<Record<string, KnownUser>>({});
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [attachmentProgress, setAttachmentProgress] = useState<{ received: number; size: number } | null>(null);
 
   const sessionRef = useRef<Identity | null>(null);
   const presenceRef = useRef(presence);
@@ -275,6 +308,8 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
   const pendingRef = useRef<PendingRequest[]>([]);
   const handleMessageRef = useRef<(message: ServerEnvelope) => void>(() => undefined);
   const connectedRef = useRef<() => Promise<void>>(async () => undefined);
+  const notificationIdsRef = useRef<Set<string>>(new Set());
+  const connectionNoticeRef = useRef<ConnectionState>("disconnected");
 
   useEffect(() => {
     sessionRef.current = session;
@@ -288,12 +323,37 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
     knownUsersRef.current = knownUsers;
   }, [knownUsers]);
 
+  const pushNotification = useCallback((item: NotificationItem) => {
+    setNotifications((items) => {
+      if (notificationIdsRef.current.has(item.id)) return items;
+      notificationIdsRef.current.add(item.id);
+      const next = [item, ...items].slice(0, 5);
+      if (notificationIdsRef.current.size > 100) {
+        const oldest = Array.from(notificationIdsRef.current).slice(0, 50);
+        oldest.forEach((id) => notificationIdsRef.current.delete(id));
+      }
+      return next;
+    });
+  }, []);
+
+  const dismissNotification = useCallback((id: string) => {
+    setNotifications((items) => items.filter((item) => item.id !== id));
+  }, []);
+
   const client = useMemo(
     () =>
       new MessengerWebSocket({
         url: MSN_SERVER_URL,
-        onStateChange: (nextState) => {
+          onStateChange: (nextState) => {
+          const previousState = connectionNoticeRef.current;
+          connectionNoticeRef.current = nextState;
           setConnectionState(nextState);
+          if (sessionRef.current && nextState === "disconnected" && previousState !== "disconnected") {
+            pushNotification({ id: `connection-lost-${Date.now()}`, kind: "connection", title: "Conexão interrompida", body: "O Hub tentará reconectar automaticamente." });
+          }
+          if (sessionRef.current && nextState === "connected" && previousState !== "connected") {
+            pushNotification({ id: `connection-restored-${Date.now()}`, kind: "connection", title: "Conexão ativa", body: "O Messenger voltou a sincronizar com o servidor." });
+          }
           if (nextState === "disconnected" && sessionRef.current) {
             const disconnectError = new Error("A conexão com o servidor foi encerrada.");
             pendingRef.current.splice(0).forEach((pending) => pending.reject(disconnectError));
@@ -320,6 +380,9 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
     presenceRef.current = {};
     setFriends([]);
     setConversations([]);
+    setAttachmentProgress(null);
+    setNotifications([]);
+    notificationIdsRef.current.clear();
   }, []);
 
   const request = useCallback(
@@ -397,32 +460,6 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
     setConversations(nextConversations);
   }, []);
 
-  const updateConversationStatus = useCallback(
-    (userId: string, nextPresence: Record<string, PresencePayload>) => {
-      setConversations((items) =>
-        items.map((conversation) => {
-          if (!conversation.participantIds.includes(userId)) return conversation;
-          return {
-            ...conversation,
-            status: statusForConversation(
-              {
-                conversation_id: conversation.id,
-                name: conversation.name,
-                is_group: conversation.kind === "group",
-                participants: conversation.participantIds,
-                created_at: "",
-                last_message_at: null,
-              },
-              sessionRef.current?.userId || "",
-              nextPresence,
-            ),
-          };
-        }),
-      );
-    },
-    [],
-  );
-
   const mergeHistory = useCallback((conversationId: string, messages: MessagePayload[], replace = true) => {
     const identity = sessionRef.current;
     if (!identity) return;
@@ -459,6 +496,18 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
         };
       }),
     );
+  }, []);
+
+  const updatePinnedMessage = useCallback((payload: MessagePinnedPayload) => {
+    setConversations((items) => items.map((conversation) => {
+      if (conversation.id !== payload.conversation_id) return conversation;
+      return {
+        ...conversation,
+        messages: conversation.messages.map((message) => message.id === payload.message.message_id
+          ? { ...message, isPinned: payload.is_pinned }
+          : message),
+      };
+    }));
   }, []);
 
   const addConversation = useCallback((payload: ConversationCreatedPayload) => {
@@ -542,16 +591,9 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
           knownUsersRef.current = nextUsers;
           setPresence(nextPresence);
           setKnownUsers(nextUsers);
-          setFriends((items) => items.map((friend) => friend.user_id === status.user_id
-            ? { ...friend, status: status.status, status_message: status.status_message, custom_status: status.custom_status || "", avatar_data: status.avatar_data, avatar_mime: status.avatar_mime }
-            : friend));
           if (sessionRef.current?.userId === status.user_id) {
             setSession((current) => current ? { ...current, custom_status: status.custom_status || "", avatar_data: status.avatar_data, avatar_mime: status.avatar_mime } : current);
           }
-          updateConversationStatus(status.user_id, nextPresence);
-          setConversations((items) => items.map((conversation) => conversation.participantIds.includes(status.user_id)
-            ? { ...conversation, customStatus: status.custom_status || "", avatarData: status.avatar_data, avatarMime: status.avatar_mime }
-            : conversation));
           break;
         }
         case "FRIENDSHIPS_UPDATED": {
@@ -573,6 +615,14 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
           setKnownUsers(mergedUsers);
           break;
         }
+        case "ATTACHMENT_UPLOAD_PROGRESS": {
+          const progress = payload as { upload_id: string; received: number; size: number };
+          setAttachmentProgress({ received: progress.received, size: progress.size });
+          break;
+        }
+        case "MESSAGE_PINNED":
+          updatePinnedMessage(payload as MessagePinnedPayload);
+          break;
         case "FRIENDSHIP_REMOVED": {
           const removed = payload as FriendshipRemovedPayload;
           setFriends((items) => items.filter((friend) => friend.friendship_id !== removed.friendship_id));
@@ -601,6 +651,16 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
         case "MESSAGE": {
           const liveMessage = payload as { message: MessagePayload };
           mergeHistory(liveMessage.message.conversation_id, [liveMessage.message], false);
+          if (liveMessage.message.sender_id !== sessionRef.current?.userId) {
+            const sender = knownUsersRef.current[liveMessage.message.sender_id];
+            pushNotification({
+              id: `message-${liveMessage.message.message_id}`,
+              kind: "message",
+              title: sender?.displayName || sender?.username || "Nova mensagem",
+              body: textFromMessage(liveMessage.message),
+              conversationId: liveMessage.message.conversation_id,
+            });
+          }
           break;
         }
         case "HISTORY": {
@@ -628,7 +688,7 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
         pending.resolve(payload);
       }
     },
-    [addConversation, applySync, clearSession, client, mergeHistory, updateConversationStatus],
+    [addConversation, applySync, clearSession, client, mergeHistory, pushNotification, updatePinnedMessage],
   );
 
   handleMessageRef.current = handleMessage;
@@ -800,6 +860,87 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
     [request, requestHistory],
   );
 
+  const sendAttachment = useCallback(
+    async (conversationId: string, file: File) => {
+      try {
+        const ready = await request<AttachmentUploadReadyPayload>(["ATTACHMENT_UPLOAD_READY"], "BEGIN_ATTACHMENT_UPLOAD", {
+          conversation_id: conversationId,
+          filename: file.name,
+          mime: file.type || "application/octet-stream",
+          size: file.size,
+        });
+        for (let offset = 0; offset < file.size; offset += ready.chunk_size) {
+          client.sendBinary(file.slice(offset, Math.min(file.size, offset + ready.chunk_size)));
+        }
+        await request<AttachmentUploadCompletePayload>(["ATTACHMENT_UPLOAD_COMPLETE"], "FINISH_ATTACHMENT_UPLOAD", {
+          upload_id: ready.upload_id,
+        });
+        setAttachmentProgress(null);
+        await requestHistory(conversationId, 100);
+      } catch (attachmentError) {
+        setAttachmentProgress(null);
+        setError(asError(attachmentError).message);
+        throw asError(attachmentError);
+      }
+    },
+    [client, request, requestHistory],
+  );
+
+  const searchMessages = useCallback(async (conversationId: string, query: string, before?: string) => {
+    try {
+      const result = await request<MessageSearchPayload>(["MESSAGE_SEARCH_RESULT"], "SEARCH_MESSAGES", {
+        conversation_id: conversationId,
+        query,
+        limit: 100,
+        ...(before ? { before } : {}),
+      });
+      return result.messages;
+    } catch (searchError) {
+      setError(asError(searchError).message);
+      throw asError(searchError);
+    }
+  }, [request]);
+
+  const listPinnedMessages = useCallback(async (conversationId: string) => {
+    try {
+      const result = await request<{ conversation_id: string; messages: MessagePayload[] }>(["PINNED_MESSAGES"], "LIST_PINNED_MESSAGES", { conversation_id: conversationId });
+      return result.messages;
+    } catch (pinError) {
+      setError(asError(pinError).message);
+      throw asError(pinError);
+    }
+  }, [request]);
+
+  const pinMessage = useCallback(async (conversationId: string, messageId: string, pinned: boolean) => {
+    try {
+      await request<MessagePinnedPayload>(["MESSAGE_PINNED"], pinned ? "PIN_MESSAGE" : "UNPIN_MESSAGE", {
+        conversation_id: conversationId,
+        message_id: messageId,
+      });
+    } catch (pinError) {
+      setError(asError(pinError).message);
+      throw asError(pinError);
+    }
+  }, [request]);
+
+  const updateDisplayName = useCallback(async (displayName: string) => {
+    try {
+      await request<ProfileUpdatedPayload>(["PROFILE_UPDATED"], "UPDATE_PROFILE", { display_name: displayName });
+    } catch (profileError) {
+      setError(asError(profileError).message);
+      throw asError(profileError);
+    }
+  }, [request]);
+
+  const changePassword = useCallback(async (currentPassword: string, newPassword: string) => {
+    try {
+      await request(["PASSWORD_CHANGED"], "CHANGE_PASSWORD", { current_password: currentPassword, new_password: newPassword });
+    } catch (passwordError) {
+      setError(asError(passwordError).message);
+      throw asError(passwordError);
+    }
+  }, [request]);
+
   const createGroup = useCallback(
     async (name: string, participants: string[]) => {
       try {
@@ -904,6 +1045,47 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
     }
   }, [client]);
 
+  const visibleFriends = useMemo(
+    () => friends.map((friend) => {
+      const current = presence[friend.user_id];
+      if (!current) return friend;
+      return {
+        ...friend,
+        status: current.status,
+        status_message: current.status_message,
+        display_name: current.display_name || friend.display_name,
+        avatar_data: current.avatar_data ?? friend.avatar_data,
+        avatar_mime: current.avatar_mime ?? friend.avatar_mime,
+        custom_status: current.custom_status || friend.custom_status || "",
+      };
+    }),
+    [friends, presence],
+  );
+
+  const visibleConversations = useMemo(
+    () => conversations.map((conversation) => {
+      const payload: ConversationPayload = {
+        conversation_id: conversation.id,
+        name: conversation.kind === "group" ? conversation.name : null,
+        is_group: conversation.kind === "group",
+        participants: conversation.participantIds,
+        created_at: "",
+        last_message_at: null,
+      };
+      const peerId = conversation.participantIds.find((id) => id !== session?.userId) || "";
+      const peerPresence = presence[peerId];
+      const peerUser = knownUsers[peerId];
+      return {
+        ...conversation,
+        status: statusForConversation(payload, session?.userId || "", presence),
+        customStatus: peerPresence?.custom_status || peerUser?.custom_status || conversation.customStatus,
+        avatarData: peerPresence?.avatar_data ?? peerUser?.avatar_data ?? conversation.avatarData,
+        avatarMime: peerPresence?.avatar_mime ?? peerUser?.avatar_mime ?? conversation.avatarMime,
+      };
+    }),
+    [conversations, knownUsers, presence, session?.userId],
+  );
+
   const value = useMemo<MessengerContextValue>(
     () => ({
       session,
@@ -912,8 +1094,8 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
       error,
       busy,
       status: session ? presence[session.userId]?.status || "online" : "offline",
-      conversations,
-      friends,
+      conversations: visibleConversations,
+      friends: visibleFriends,
       presence,
       login,
       register,
@@ -930,7 +1112,16 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
       openConversation,
       setAvatar,
       setCustomStatus,
+      sendAttachment,
+      searchMessages,
+      pinMessage,
+      listPinnedMessages,
+      updateDisplayName,
+      changePassword,
       reconnectNow,
+      dismissNotification,
+      notifications,
+      attachmentProgress,
       clearError: () => setError(null),
     }),
     [
@@ -946,6 +1137,8 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
       resetPassword,
       presence,
       reconnectNow,
+      visibleConversations,
+      visibleFriends,
       register,
       requestHistory,
       searchUsers,
@@ -956,7 +1149,16 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
       setAvatar,
       setCustomStatus,
       sendMessage,
+      sendAttachment,
+      searchMessages,
+      pinMessage,
+      listPinnedMessages,
+      updateDisplayName,
+      changePassword,
       session,
+      dismissNotification,
+      notifications,
+      attachmentProgress,
     ],
   );
 

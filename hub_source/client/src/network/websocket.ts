@@ -66,6 +66,13 @@ export class MessengerWebSocket {
     this.socket.send(JSON.stringify({ command, ...fields }));
   }
 
+  sendBinary(data: ArrayBuffer | Blob): void {
+    if (this.socket?.readyState !== WebSocket.OPEN) {
+      throw new Error("O servidor não está conectado.");
+    }
+    this.socket.send(data);
+  }
+
   close(): void {
     this.manuallyClosed = true;
     this.autoReconnect = false;

@@ -26,9 +26,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from urllib.parse import parse_qs, urlsplit
 from typing import Any, Optional
 
 import websockets
+from websockets.datastructures import Headers
+from websockets.http11 import Request, Response
 from websockets.server import ServerConnection
 
 from server.core import ServerCore
@@ -86,6 +89,34 @@ class WebSocketHandler:
                 except Exception:
                     pass
 
+    async def process_request(self, _connection: ServerConnection, request: Request) -> Response | None:
+        parsed = urlsplit(request.path)
+        prefix = "/attachments/"
+        if not parsed.path.startswith(prefix):
+            return None
+        attachment_id = parsed.path[len(prefix):].strip("/")
+        query = parse_qs(parsed.query)
+        user_id = query.get("user", [""])[0]
+        expires = query.get("expires", [""])[0]
+        signature = query.get("sig", [""])[0]
+        if not attachment_id or not self.core.attachments.verify_download_signature(attachment_id, user_id, expires, signature):
+            return Response(403, "Forbidden", Headers({"Content-Type": "text/plain; charset=utf-8"}), b"Download not authorized")
+        attachment = self.core.attachments.get_attachment(attachment_id)
+        if attachment is None or not self.core.conversations.is_participant(attachment["conversation_id"], user_id):
+            return Response(404, "Not Found", Headers({"Content-Type": "text/plain; charset=utf-8"}), b"Attachment not found")
+        try:
+            with self.core.attachments.open_attachment(attachment) as handle:
+                body = handle.read()
+        except Exception:
+            return Response(404, "Not Found", Headers({"Content-Type": "text/plain; charset=utf-8"}), b"Attachment not found")
+        headers = Headers({
+            "Content-Type": attachment["mime_type"],
+            "Content-Length": str(len(body)),
+            "Content-Disposition": f'attachment; filename="{attachment["original_name"].replace(chr(34), "_")}"',
+            "Cache-Control": "private, max-age=3600",
+        })
+        return Response(200, "OK", headers, body)
+
     async def handle(self, websocket: ServerConnection) -> None:
         """Entry point for websockets.serve."""
         from server.shared_types import new_id
@@ -96,6 +127,16 @@ class WebSocketHandler:
 
         try:
             async for raw in websocket:
+                if isinstance(raw, (bytes, bytearray)):
+                    try:
+                        await self.core.receive_attachment_chunk(connection_id, bytes(raw))
+                    except Exception:
+                        log.exception("Internal error processing binary upload from %s", connection_id)
+                        await websocket.send(format_server_message(
+                            ServerCore.error_envelope("UPLOAD_FAILED", "O upload não pôde ser processado.")))
+                    finally:
+                        await self._flush(connection_id, websocket)
+                    continue
                 try:
                     command = parse_client_message(raw)
                 except ProtocolError as exc:
@@ -169,6 +210,9 @@ class WebSocketHandler:
                 command.get("status_message"),
             )
         elif cmd == "SEND_MESSAGE":
+            if command["type"] == "attachment":
+                self.core._push(connection_id, ServerCore.error_envelope("ATTACHMENT_UPLOAD_REQUIRED", "Anexos devem ser enviados pelo fluxo de upload seguro."))
+                return
             await self.core.send_message(
                 connection_id,
                 command["conversation_id"],
@@ -202,6 +246,29 @@ class WebSocketHandler:
                 connection_id, command["data"], command["filename"], command["mime"])
         elif cmd == "SET_CUSTOM_STATUS":
             await self.core.set_custom_status(connection_id, command["message"])
+        elif cmd == "BEGIN_ATTACHMENT_UPLOAD":
+            await self.core.begin_attachment_upload(
+                connection_id, command["conversation_id"], command["filename"],
+                command["mime"], command["size"])
+        elif cmd == "FINISH_ATTACHMENT_UPLOAD":
+            await self.core.finish_attachment_upload(connection_id, command["upload_id"])
+        elif cmd == "ABORT_ATTACHMENT_UPLOAD":
+            await self.core.abort_attachment_upload(connection_id, command["upload_id"])
+        elif cmd == "SEARCH_MESSAGES":
+            await self.core.search_messages(
+                connection_id, command["conversation_id"], command["query"],
+                limit=command.get("limit", 50), before=command.get("before"))
+        elif cmd == "LIST_PINNED_MESSAGES":
+            await self.core.list_pinned_messages(connection_id, command["conversation_id"])
+        elif cmd == "PIN_MESSAGE":
+            await self.core.pin_message(connection_id, command["conversation_id"], command["message_id"], True)
+        elif cmd == "UNPIN_MESSAGE":
+            await self.core.pin_message(connection_id, command["conversation_id"], command["message_id"], False)
+        elif cmd == "UPDATE_PROFILE":
+            await self.core.update_profile(connection_id, command["display_name"])
+        elif cmd == "CHANGE_PASSWORD":
+            await self.core.change_password(
+                connection_id, command["current_password"], command["new_password"])
         elif cmd == "LOGOUT":
             await self.core.logout(connection_id)
         else:  # pragma: no cover - guarded by parser

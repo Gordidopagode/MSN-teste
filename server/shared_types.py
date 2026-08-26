@@ -51,6 +51,7 @@ class MessageType(str, Enum):
     message travels as {type, payload}.
     """
     TEXT = "text"
+    ATTACHMENT = "attachment"
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +209,7 @@ class Message:
         self.payload = payload or {"content": ""}
         self.timestamp = timestamp or now_iso()
         self.metadata = metadata or {}
+        self.is_pinned = False
 
     def to_dict(self) -> dict[str, Any]:
         return {

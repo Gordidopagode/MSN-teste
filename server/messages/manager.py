@@ -54,16 +54,29 @@ class MessageManager:
                     f"Mensagem muito longa (máx. {self._settings.max_message_length} caracteres)."
                 )
             return {"content": content}
+        if msg_type == MessageType.ATTACHMENT:
+            if not isinstance(payload, dict) or not isinstance(payload.get("attachment"), dict):
+                raise MessageError("Payload de anexo inválido.")
+            attachment = payload["attachment"]
+            required = {"attachment_id", "original_name", "mime_type", "size"}
+            if not required.issubset(attachment):
+                raise MessageError("Metadados de anexo incompletos.")
+            if not isinstance(attachment["size"], int) or attachment["size"] <= 0:
+                raise MessageError("Tamanho de anexo inválido.")
+            return {"attachment": dict(attachment)}
         raise MessageError(f"Tipo de mensagem não suportado: {msg_type!r}")
 
     # -- sending -------------------------------------------------------------
 
     async def send_message(self, sender_id: str, conversation_id: str,
                            msg_type: str, payload: Any,
-                           message_id: Optional[str] = None) -> dict[str, Any]:
+                           message_id: Optional[str] = None,
+                           *, trusted_attachment: bool = False) -> dict[str, Any]:
         if not self._conversations.is_participant(conversation_id, sender_id):
             raise MessageError("Você não participa dessa conversa.")
 
+        if msg_type == MessageType.ATTACHMENT and not trusted_attachment:
+            raise MessageError("Anexos devem ser enviados pelo fluxo de upload seguro.")
         validated = self._validate_payload(msg_type, payload)
 
         # Stabilization item 11: message_id collision check. If the client

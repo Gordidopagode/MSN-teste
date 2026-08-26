@@ -7,6 +7,13 @@ export type ServerMessageType =
   | "MESSAGE_ACK"
   | "MESSAGE"
   | "HISTORY"
+  | "ATTACHMENT_UPLOAD_READY"
+  | "ATTACHMENT_UPLOAD_PROGRESS"
+  | "ATTACHMENT_UPLOAD_COMPLETE"
+  | "MESSAGE_SEARCH_RESULT"
+  | "PINNED_MESSAGES"
+  | "MESSAGE_PINNED"
+  | "PASSWORD_CHANGED"
   | "CONVERSATION_CREATED"
   | "USER_STATUS_CHANGED"
   | "FRIENDSHIPS_UPDATED"
@@ -27,6 +34,15 @@ export type ClientCommand =
   | "CHANGE_STATUS"
   | "SEND_MESSAGE"
   | "GET_HISTORY"
+  | "BEGIN_ATTACHMENT_UPLOAD"
+  | "FINISH_ATTACHMENT_UPLOAD"
+  | "ABORT_ATTACHMENT_UPLOAD"
+  | "SEARCH_MESSAGES"
+  | "LIST_PINNED_MESSAGES"
+  | "PIN_MESSAGE"
+  | "UNPIN_MESSAGE"
+  | "UPDATE_PROFILE"
+  | "CHANGE_PASSWORD"
   | "CREATE_GROUP"
   | "SEARCH_USERS"
   | "SEND_FRIEND_REQUEST"
@@ -57,6 +73,11 @@ export interface ProfilePayload {
   avatar_data?: string | null;
   avatar_mime?: string | null;
   custom_status?: string;
+  presence?: {
+    status: PresenceStatus;
+    status_message?: string;
+    custom_status?: string;
+  };
 }
 
 export interface IdentityPayload extends ProfilePayload {}
@@ -88,6 +109,16 @@ export interface FriendshipPayload extends ProfilePayload {
   updated_at: string;
 }
 
+export interface AttachmentPayload {
+  attachment_id: string;
+  original_name: string;
+  mime_type: string;
+  size: number;
+  sha256?: string;
+  created_at?: string;
+  download_url?: string;
+}
+
 export interface MessagePayload {
   message_id: string;
   conversation_id: string;
@@ -96,9 +127,11 @@ export interface MessagePayload {
   type: "text" | string;
   payload: {
     content?: string;
+    attachment?: AttachmentPayload;
     [key: string]: unknown;
   };
   metadata?: Record<string, unknown>;
+  is_pinned?: boolean;
 }
 
 export interface ConversationPayload {
@@ -121,6 +154,42 @@ export interface SyncDataPayload {
     conversations: ConversationPayload[];
     history: Record<string, MessagePayload[]>;
   };
+}
+
+export interface AttachmentUploadReadyPayload {
+  upload_id: string;
+  chunk_size: number;
+  max_bytes: number;
+}
+
+export interface AttachmentUploadProgressPayload {
+  upload_id: string;
+  received: number;
+  size: number;
+}
+
+export interface AttachmentUploadCompletePayload {
+  attachment: AttachmentPayload;
+  message_id: string;
+}
+
+export interface MessageSearchPayload {
+  conversation_id: string;
+  query: string;
+  messages: MessagePayload[];
+  before?: string | null;
+}
+
+export interface PinnedMessagesPayload {
+  conversation_id: string;
+  messages: MessagePayload[];
+}
+
+export interface MessagePinnedPayload {
+  conversation_id: string;
+  message: MessagePayload;
+  is_pinned: boolean;
+  changed: boolean;
 }
 
 export interface HistoryPayload {

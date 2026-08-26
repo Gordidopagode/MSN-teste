@@ -17,6 +17,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from server.attachments.manager import AttachmentError, AttachmentManager
 from server.auth.manager import AuthError, AuthManager
 from server.conversations.manager import ConversationError, ConversationManager
 from server.config.settings import ServerSettings
@@ -57,16 +58,20 @@ class ServerCore:
         self.messages = MessageManager(
             self.store, settings, self.conversations, self.bus
         )
+        self.attachments = AttachmentManager(self.store, settings)
         self.sync = SyncManager(
             settings, self.sessions, self.presence,
             self.conversations, self.messages, self.store,
-            self.friendships,
+            self.friendships, self.attachments,
+            self._attachment_public_url,
         )
         # spam protection: per-user message timestamps
         self._msg_log: dict[str, list[float]] = defaultdict(list)
         # pending envelopes queued for delivery (connection_id -> list)
         self.pending: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._closed_connections: set[str] = set()
+        self._attachment_upload_counts: dict[str, int] = defaultdict(int)
+        self._binary_upload_for_connection: dict[str, str] = {}
         # optional async broadcast flush hook wired by the network layer
         self._broadcast_flush = None
 
@@ -118,6 +123,9 @@ class ServerCore:
         """Synchronous cleanup: transport drops can happen anywhere, including
         inside flush loops. Presence state is updated synchronously here so
         tests and callers remain deterministic."""
+        self.attachments.discard_connection_uploads(connection_id)
+        self._attachment_upload_counts.pop(connection_id, None)
+        self._binary_upload_for_connection.pop(connection_id, None)
         session_id = self.sessions.connection_session_id(connection_id)
         if session_id is None:
             return  # never authenticated or already cleaned up
@@ -144,7 +152,6 @@ class ServerCore:
         self._closed_connections.add(connection_id)
         self.pending.pop(connection_id, None)
         self._msg_log.pop(session_id, None)
-
         self.presence.set_offline(user_id)
         self.bus._recorded.append(Event(USER_DISCONNECTED, f"connection:{connection_id}", {
             "user_id": user_id,
@@ -280,6 +287,9 @@ class ServerCore:
         self._closed_connections.add(conn)
         self.sessions.unbind_connection(conn)
         self.sessions.remove_session(session_id)
+        self.attachments.discard_connection_uploads(conn)
+        self._attachment_upload_counts.pop(conn, None)
+        self._binary_upload_for_connection.pop(conn, None)
 
     # -- registration --------------------------------------------------------
 
@@ -439,10 +449,11 @@ class ServerCore:
             return
         entry = self.sessions.get_session_entry(session_id)
         assert entry is not None
-        users = [
-            self.profiles.public_user(user)
-            for user in self.friendships.search(query, entry["user"]["user_id"])
-        ]
+        users = []
+        for user in self.friendships.search(query, entry["user"]["user_id"]):
+            profile = self.profiles.public_user(user)
+            profile["presence"] = self._public_presence(user["user_id"])
+            users.append(profile)
         self._push(connection_id, self._envelope("SEARCH_USERS_RESULT", {"users": users}))
 
     async def send_friend_request(self, connection_id: str, username: str) -> None:
@@ -567,6 +578,217 @@ class ServerCore:
         }))
         self._push_presence_update(user_id)
 
+    async def update_profile(self, connection_id: str, display_name: str) -> None:
+        session_id = self.sessions.connection_session_id(connection_id)
+        if session_id is None:
+            self._push(connection_id, self.error_envelope("AUTH_REQUIRED", "É necessário fazer login primeiro."))
+            return
+        entry = self.sessions.get_session_entry(session_id)
+        assert entry is not None
+        try:
+            user = await self.auth.update_display_name(entry["user"]["user_id"], display_name)
+        except AuthError as exc:
+            self._push(connection_id, self.error_envelope("PROFILE_UPDATE_FAILED", str(exc)))
+            return
+        entry["user"]["display_name"] = user["display_name"]
+        self._push_to_all(self._envelope("PROFILE_UPDATED", {"user": self.profiles.public_user(user)}))
+        self._push_presence_update(user["user_id"])
+
+    async def change_password(self, connection_id: str, current_password: str,
+                              new_password: str) -> None:
+        session_id = self.sessions.connection_session_id(connection_id)
+        if session_id is None:
+            self._push(connection_id, self.error_envelope("AUTH_REQUIRED", "É necessário fazer login primeiro."))
+            return
+        entry = self.sessions.get_session_entry(session_id)
+        assert entry is not None
+        try:
+            await self.auth.change_password(entry["user"]["user_id"], current_password, new_password, session_id)
+        except AuthError as exc:
+            self._push(connection_id, self.error_envelope("PASSWORD_CHANGE_FAILED", str(exc)))
+            return
+        for other in list(self.sessions.iter_sessions_for_user(entry["user"]["user_id"])):
+            if other["session"].session_id != session_id:
+                self._force_close_session(other["session"].session_id)
+        self._push(connection_id, self._envelope("PASSWORD_CHANGED", {}))
+
+    # -- attachments ----------------------------------------------------------
+
+    def _attachment_public_url(self, attachment_id: str, user_id: str) -> str:
+        base = self.settings.public_base_url
+        if not base:
+            host = "127.0.0.1" if self.settings.host in {"0.0.0.0", "::"} else self.settings.host
+            base = f"http://{host}:{self.settings.port}"
+        return self.attachments.signed_download_url(attachment_id, user_id, base)
+
+    def _public_attachment(self, attachment: dict[str, Any], user_id: str) -> dict[str, Any]:
+        return {
+            "attachment_id": attachment["attachment_id"],
+            "original_name": attachment["original_name"],
+            "mime_type": attachment["mime_type"],
+            "size": attachment["size"],
+            "sha256": attachment["sha256"],
+            "created_at": attachment["created_at"],
+            "download_url": self._attachment_public_url(attachment["attachment_id"], user_id),
+        }
+
+    async def begin_attachment_upload(self, connection_id: str, conversation_id: str,
+                                      filename: str, mime: str, size: int) -> None:
+        session_id = self.sessions.connection_session_id(connection_id)
+        if session_id is None:
+            self._push(connection_id, self.error_envelope("AUTH_REQUIRED", "É necessário fazer login primeiro."))
+            return
+        entry = self.sessions.get_session_entry(session_id)
+        assert entry is not None
+        user_id = entry["user"]["user_id"]
+        if not self.conversations.is_participant(conversation_id, user_id):
+            self._push(connection_id, self.error_envelope("MESSAGE_FAILED", "Você não participa dessa conversa."))
+            return
+        if self._attachment_upload_counts[connection_id] >= self.settings.attachment_max_per_message:
+            self._push(connection_id, self.error_envelope("UPLOAD_LIMITED", "Há uploads demais em andamento."))
+            return
+        try:
+            result = self.attachments.begin_upload(connection_id, user_id, conversation_id, filename, mime, size)
+        except AttachmentError as exc:
+            self._push(connection_id, self.error_envelope(exc.code, str(exc)))
+            return
+        self._attachment_upload_counts[connection_id] += 1
+        self.select_attachment_upload(connection_id, result["upload_id"])
+        self._push(connection_id, self._envelope("ATTACHMENT_UPLOAD_READY", result))
+
+    async def receive_attachment_chunk(self, connection_id: str, data: bytes) -> None:
+        # Binary frames carry the upload id in a short JSON header frame first;
+        # the handler stores the selected upload id on the connection.
+        upload_id = getattr(self, "_binary_upload_for_connection", {}).get(connection_id)
+        if not upload_id:
+            self._push(connection_id, self.error_envelope("UPLOAD_NOT_SELECTED", "Nenhum upload binário foi selecionado."))
+            return
+        try:
+            progress = self.attachments.append_chunk(connection_id, upload_id, data)
+        except AttachmentError as exc:
+            self._push(connection_id, self.error_envelope(exc.code, str(exc)))
+            return
+        self._push(connection_id, self._envelope("ATTACHMENT_UPLOAD_PROGRESS", progress))
+
+    def select_attachment_upload(self, connection_id: str, upload_id: str) -> None:
+        if not hasattr(self, "_binary_upload_for_connection"):
+            self._binary_upload_for_connection = {}
+        self._binary_upload_for_connection[connection_id] = upload_id
+
+    async def finish_attachment_upload(self, connection_id: str, upload_id: str) -> None:
+        session_id = self.sessions.connection_session_id(connection_id)
+        if session_id is None:
+            self._push(connection_id, self.error_envelope("AUTH_REQUIRED", "É necessário fazer login primeiro."))
+            return
+        entry = self.sessions.get_session_entry(session_id)
+        assert entry is not None
+        try:
+            conversation_id = self.attachments.upload_conversation(connection_id, entry["user"]["user_id"], upload_id)
+            if not self.conversations.is_participant(conversation_id, entry["user"]["user_id"]):
+                self.attachments.abort_upload(connection_id, upload_id)
+                raise AttachmentError("UPLOAD_FORBIDDEN", "Você não participa mais dessa conversa.")
+            attachment = self.attachments.finish_upload(connection_id, upload_id)
+            if attachment["owner_id"] != entry["user"]["user_id"] or not self.conversations.is_participant(attachment["conversation_id"], entry["user"]["user_id"]):
+                raise AttachmentError("UPLOAD_FORBIDDEN", "Este upload não pertence a essa conta ou conversa.")
+            public_attachment = self._public_attachment(attachment, entry["user"]["user_id"])
+            stored_attachment = {key: value for key, value in public_attachment.items() if key != "download_url"}
+            payload = {"attachment": stored_attachment}
+            result = await self.messages.send_message(
+                entry["user"]["user_id"], attachment["conversation_id"], "attachment", payload,
+                trusted_attachment=True,
+            )
+            self.store.link_attachment_message(attachment["attachment_id"], result["message"].message_id)
+        except (AttachmentError, MessageError) as exc:
+            code = getattr(exc, "code", "ATTACHMENT_FAILED")
+            self._push(connection_id, self.error_envelope(code, str(exc)))
+            return
+        finally:
+            self._attachment_upload_counts[connection_id] = max(0, self._attachment_upload_counts[connection_id] - 1)
+            if hasattr(self, "_binary_upload_for_connection"):
+                self._binary_upload_for_connection.pop(connection_id, None)
+        message = result["message"]
+        self._push(connection_id, self._envelope("MESSAGE_ACK", {"message_id": message.message_id, "conversation_id": message.conversation_id, "duplicate": False}))
+        conv = self.conversations.get_conversation(message.conversation_id)
+        if conv is not None:
+            for participant_id in conv.participants:
+                if participant_id == entry["user"]["user_id"]:
+                    continue
+                target_conn = self._find_connection_for_user(participant_id)
+                if target_conn:
+                    recipient_payload = {"attachment": self._public_attachment(attachment, participant_id)}
+                    delivery = self._envelope("MESSAGE", {"message": message.to_dict() | {"payload": recipient_payload, "type": "attachment"}})
+                    self._push(target_conn, delivery)
+        self._push(connection_id, self._envelope("ATTACHMENT_UPLOAD_COMPLETE", {"attachment": public_attachment, "message_id": message.message_id}))
+
+    async def abort_attachment_upload(self, connection_id: str, upload_id: str) -> None:
+        try:
+            self.attachments.abort_upload(connection_id, upload_id)
+        except AttachmentError as exc:
+            self._push(connection_id, self.error_envelope(exc.code, str(exc)))
+        finally:
+            self._attachment_upload_counts[connection_id] = max(0, self._attachment_upload_counts[connection_id] - 1)
+            if hasattr(self, "_binary_upload_for_connection"):
+                self._binary_upload_for_connection.pop(connection_id, None)
+
+    # -- message search and pins --------------------------------------------
+
+    async def search_messages(self, connection_id: str, conversation_id: str,
+                              query: str, limit: int = 50,
+                              before: Optional[str] = None) -> None:
+        session_id = self.sessions.connection_session_id(connection_id)
+        if session_id is None:
+            self._push(connection_id, self.error_envelope("AUTH_REQUIRED", "É necessário fazer login primeiro."))
+            return
+        entry = self.sessions.get_session_entry(session_id)
+        assert entry is not None
+        if not self.conversations.is_participant(conversation_id, entry["user"]["user_id"]):
+            self._push(connection_id, self.error_envelope("MESSAGE_FAILED", "Você não participa dessa conversa."))
+            return
+        messages = self.store.search_messages(conversation_id, query, limit=min(limit, 100), before=before)
+        messages = [self.sync.hydrate_message(message, entry["user"]["user_id"]) for message in messages]
+        self._push(connection_id, self._envelope("MESSAGE_SEARCH_RESULT", {"conversation_id": conversation_id, "query": query, "messages": messages, "before": before}))
+
+    async def list_pinned_messages(self, connection_id: str, conversation_id: str) -> None:
+        session_id = self.sessions.connection_session_id(connection_id)
+        if session_id is None:
+            self._push(connection_id, self.error_envelope("AUTH_REQUIRED", "É necessário fazer login primeiro."))
+            return
+        entry = self.sessions.get_session_entry(session_id)
+        assert entry is not None
+        if not self.conversations.is_participant(conversation_id, entry["user"]["user_id"]):
+            self._push(connection_id, self.error_envelope("MESSAGE_FAILED", "Você não participa dessa conversa."))
+            return
+        messages = [self.sync.hydrate_message(message, entry["user"]["user_id"]) for message in self.store.list_pinned_messages(conversation_id)]
+        self._push(connection_id, self._envelope("PINNED_MESSAGES", {"conversation_id": conversation_id, "messages": messages}))
+
+    async def pin_message(self, connection_id: str, conversation_id: str, message_id: str, pinned: bool) -> None:
+        session_id = self.sessions.connection_session_id(connection_id)
+        if session_id is None:
+            self._push(connection_id, self.error_envelope("AUTH_REQUIRED", "É necessário fazer login primeiro."))
+            return
+        entry = self.sessions.get_session_entry(session_id)
+        assert entry is not None
+        user_id = entry["user"]["user_id"]
+        if not self.conversations.is_participant(conversation_id, user_id):
+            self._push(connection_id, self.error_envelope("MESSAGE_FAILED", "Você não participa dessa conversa."))
+            return
+        message = self.store.get_message(message_id)
+        if message is None or message["conversation_id"] != conversation_id:
+            self._push(connection_id, self.error_envelope("MESSAGE_NOT_FOUND", "Mensagem não encontrada."))
+            return
+        changed = self.store.pin_message(conversation_id, message_id, user_id, datetime.now(timezone.utc).isoformat()) if pinned else self.store.unpin_message(conversation_id, message_id)
+        current = self.store.get_message(message_id) or message
+        conv = self.conversations.get_conversation(conversation_id)
+        if conv:
+            for participant_id in conv.participants:
+                target_conn = self._find_connection_for_user(participant_id)
+                if target_conn:
+                    hydrated = self.sync.hydrate_message(current, participant_id)
+                    self._push(target_conn, self._envelope("MESSAGE_PINNED", {"conversation_id": conversation_id, "message": hydrated, "is_pinned": pinned, "changed": changed}))
+        else:
+            hydrated = self.sync.hydrate_message(current, user_id)
+            self._push(connection_id, self._envelope("MESSAGE_PINNED", {"conversation_id": conversation_id, "message": hydrated, "is_pinned": pinned, "changed": changed}))
+
     # -- conversations -------------------------------------------------------
 
     async def create_group(self, connection_id: str, name: str,
@@ -584,17 +806,26 @@ class ServerCore:
         # Resolve usernames -> user_ids
         resolved: list[str] = []
         missing: list[str] = []
+        invalid: list[str] = []
         for uname in participants:
             row = self.store.get_user_by_username(uname.strip().lower())
             if row is None:
                 missing.append(uname)
-            else:
+            elif row["user_id"] == user["user_id"]:
+                invalid.append(uname)
+            elif row["user_id"] not in resolved:
                 resolved.append(row["user_id"])
 
         if missing:
             self._push(connection_id, self.error_envelope(
                 "USER_NOT_FOUND",
                 f"Usuários não encontrados: {', '.join(missing)}"))
+            return
+        if invalid:
+            self._push(connection_id, self.error_envelope("CONVERSATION_FAILED", "Você não pode adicionar a si mesmo ao grupo."))
+            return
+        if not resolved:
+            self._push(connection_id, self.error_envelope("CONVERSATION_FAILED", "Selecione pelo menos um participante."))
             return
 
         try:
@@ -720,6 +951,7 @@ class ServerCore:
                 "MESSAGE_FAILED", str(exc)))
             return
 
+        history = [self.sync.hydrate_message(message, entry["user"]["user_id"]) for message in history]
         self._push(connection_id, self._envelope("HISTORY", {
             "conversation_id": conversation_id,
             "messages": history,
