@@ -43,7 +43,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\build_windows.ps1
 ```
 
-O script cria `release\MSN Messenger.exe`, copia o build já existente do Hub para `release\client\public`, compila o servidor Python existente para `release\server_bundle\msn-server.exe` e mantém `data`, `logs` e `config` ao lado do executável.
+O script cria `release\MSN Messenger.exe`, copia o build já existente do Hub para `release\client\public`, compila o servidor Python existente para `release\server_bundle\msn-server.exe` e mantém `data`, `logs` e `config` ao lado do executável. No desenvolvimento, `pnpm build` também sincroniza automaticamente o resultado para `client\public`, que é a pasta servida pelo launcher.
 
 O usuário final não precisa instalar Python, Node.js, npm ou pytest quando recebe a pasta `release` completa. Durante o build, Node/pnpm são necessários apenas para recompilar o frontend e PyInstaller é necessário apenas para montar os executáveis.
 

@@ -54,7 +54,10 @@ O código usa o alfabeto `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, que evita caractere
 | `server/tests/test_auth.py` | Cadastro sem e-mail e entrega do código cobertos. |
 | `server/tests/test_password_recovery.py` | Testes locais de hash, uso único, rate limiting, isolamento, restart e conta antiga. |
 | `server/tests/test_local_architecture.py` | Testes WebSocket locais, três clientes, chat, launcher, origem e ausência de SMTP. |
-| `hub_source/client/public/index.html` e assets gerados | Bundle atualizado pelo build do frontend. |
+| `hub_source/client/public/index.html` e assets gerados | Bundle de origem atualizado pelo build do frontend. |
+| `hub_source/sync-launcher-public.mjs` | Sincroniza automaticamente o bundle compilado para `client/public`, que é a pasta servida pelo launcher. |
+| `hub_source/package.json` | Faz `pnpm build` executar a sincronização do bundle do launcher. |
+| `client/public/index.html` e assets gerados | Bundle efetivamente servido pelo launcher, atualizado após a correção. |
 
 Não foram criados novos arquivos de produção. O arquivo novo `RELATORIO_RECUPERACAO_LOCAL.md` é somente documentação; a tabela é criada automaticamente pelo schema existente quando o servidor inicializa.
 
@@ -111,7 +114,11 @@ Contas antigas que já possuem o registro legado de `password_reset_tokens` cont
 
 Durante o teste manual foi usada uma conta descartável em banco temporário. O código exibido não foi incluído neste relatório, em logs ou em arquivos do projeto.
 
-## 10. Problemas e limitações restantes
+## 10. Correção da divergência entre fonte e launcher
+
+A investigação após a execução no Windows identificou que o launcher não serve diretamente `hub_source/client/public`; ele serve `client/public` na raiz do projeto. A fonte já continha o novo fluxo, mas o bundle raiz ainda era antigo e por isso o usuário via o campo Gmail e a recuperação antiga. O build agora executa `hub_source/sync-launcher-public.mjs`, que copia automaticamente o `index.html` e somente os assets hashados referenciados para `client/public`. Também foi adicionada uma regressão que verifica a presença de `recovery_code` e a ausência de `requestPasswordReset` no bundle efetivamente servido.
+
+## 11. Problemas e limitações restantes
 
 O código é uma credencial permanente até uso ou bloqueio por tentativas. Se for perdido antes da confirmação, não há recuperação automática; será necessário um procedimento administrativo futuro, caso o projeto venha a precisar dele. O reset continua invalidando as sessões da conta, portanto o usuário deverá fazer login novamente após recuperar a senha.
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import socket
 import tempfile
@@ -290,6 +291,20 @@ def test_smtp_settings_remain_optional(monkeypatch: pytest.MonkeyPatch) -> None:
     assert not settings.smtp_username
     assert not settings.smtp_password
     assert not settings.smtp_from
+
+
+def test_launcher_bundle_contains_local_recovery_flow() -> None:
+    project_dir = Path(__file__).resolve().parents[2]
+    public_dir = project_dir / "client" / "public"
+    html = (public_dir / "index.html").read_text(encoding="utf-8")
+    script_ref = re.search(r'assets/index-[^" ]+\.js', html)
+    style_ref = re.search(r'assets/index-[^" ]+\.css', html)
+    assert script_ref is not None
+    assert style_ref is not None
+    script = (public_dir / script_ref.group(0)).read_text(encoding="utf-8")
+    assert "recovery_code" in script
+    assert "requestPasswordReset" not in script
+    assert "Código de recuperação" in script
 
 
 @pytest.mark.asyncio
