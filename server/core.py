@@ -17,8 +17,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from server.auth.manager import AuthError, AuthManager, EmailSender
-from server.email.service import send_password_reset_email
+from server.auth.manager import AuthError, AuthManager
 from server.conversations.manager import ConversationError, ConversationManager
 from server.config.settings import ServerSettings
 from server.events.bus import (
@@ -41,8 +40,7 @@ log = logging.getLogger("msn.core")
 class ServerCore:
     """The brain of the server."""
 
-    def __init__(self, settings: ServerSettings,
-                 email_sender: Optional[EmailSender] = None) -> None:  # noqa: C901
+    def __init__(self, settings: ServerSettings) -> None:  # noqa: C901
         self.settings = settings
         self.store = Persistence(
             settings.data_dir + "/msn_server.db"
@@ -54,10 +52,7 @@ class ServerCore:
         self.presence.restore(self.store.load_presence())
         self.profiles = ProfileManager(self.store)
         self.friendships = FriendshipManager(self.store)
-        self.auth = AuthManager(
-            self.store, settings, self.bus,
-            email_sender=email_sender or send_password_reset_email,
-        )
+        self.auth = AuthManager(self.store, settings, self.bus)
         self.conversations = ConversationManager(self.store)
         self.messages = MessageManager(
             self.store, settings, self.conversations, self.bus
@@ -181,6 +176,8 @@ class ServerCore:
 
         user = self.store.get_user(session.user_id)
         assert user is not None
+        recovery_code = session.recovery_code
+        session.recovery_code = None
 
         # If the same user already has a live session (re-login from another
         # place), close the old one so presence stays consistent.
@@ -208,7 +205,7 @@ class ServerCore:
         }))
 
         log.info("User authenticated: %s", user["username"])
-        self._push(connection_id, self._envelope("AUTH_OK", {
+        auth_payload = {
             "session_id": session.session_id,
             "user_id": user["user_id"],
             "username": user["username"],
@@ -216,7 +213,10 @@ class ServerCore:
             "avatar_data": user.get("avatar_data"),
             "avatar_mime": user.get("avatar_mime"),
             "custom_status": user.get("custom_status") or "",
-        }))
+        }
+        if recovery_code:
+            auth_payload["recovery_code"] = recovery_code
+        self._push(connection_id, self._envelope("AUTH_OK", auth_payload))
 
     async def reconnect(self, connection_id: str, session_id: str) -> None:
         """Handle RECONNECT. Reuses a valid (possibly dormant) session."""
@@ -284,31 +284,24 @@ class ServerCore:
     # -- registration --------------------------------------------------------
 
     async def register(self, connection_id: str, username: str,
-                       display_name: str, password: str, email: str) -> None:
+                       display_name: str, password: str, email: Optional[str] = None) -> None:
         try:
-            user = await self.auth.register(username, display_name, password, email)
+            result = await self.auth.register(username, display_name, password, email)
         except AuthError as exc:
             self._push(connection_id, self.error_envelope(
                 "REGISTER_FAILED", str(exc)))
             log.warning("Registration failed: %s", exc)
             return
         self._push(connection_id, self._envelope("REGISTER_OK", {
-            "username": user.username,
+            "username": result.user.username,
+            "recovery_code": result.recovery_code,
         }))
-        log.info("New user registered: %s", user.username)
+        log.info("New user registered: %s", result.user.username)
 
-    async def request_password_reset(self, connection_id: str, email: str) -> None:
-        await self.auth.request_password_reset(email)
-        # Always return the same response, including for unknown addresses or
-        # SMTP failures, so the endpoint cannot enumerate accounts.
-        self._push(connection_id, self._envelope("PASSWORD_RESET_REQUESTED", {
-            "message": "Se o e-mail estiver cadastrado, enviaremos um código temporário."
-        }))
-
-    async def reset_password(self, connection_id: str, email: str,
+    async def reset_password(self, connection_id: str, username: str,
                              code: str, new_password: str) -> None:
         try:
-            await self.auth.reset_password(email, code, new_password)
+            await self.auth.reset_password(username, code, new_password)
         except AuthError as exc:
             self._push(connection_id, self.error_envelope(
                 "PASSWORD_RESET_FAILED", str(exc)))

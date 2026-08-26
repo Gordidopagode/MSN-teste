@@ -1,8 +1,9 @@
-"""SMTP delivery for password-recovery messages.
+"""Optional legacy SMTP delivery helper.
 
-The service intentionally receives credentials through ServerSettings only. It
-never persists them, returns them to callers, or logs them. Password-reset
-codes are included in the email body but are not written to application logs.
+The current password-recovery flow uses a local one-time code and never calls
+this module. It remains isolated for future compatibility: credentials are read
+from ServerSettings only, connections are created per operation, and no code or
+credential is written to application logs.
 """
 
 from __future__ import annotations

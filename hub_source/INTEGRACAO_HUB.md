@@ -26,13 +26,13 @@ A HUB visual existente foi transformada em cliente do servidor Python já implem
 
 A HUB abre um WebSocket usando `VITE_MSN_SERVER_URL`. Se a variável não existir, o endereço padrão é `ws://localhost:8765`. O Express da HUB não duplica regras de autenticação ou mensagens.
 
-No login, o cliente envia `LOGIN`, aguarda `AUTH_OK`, guarda a sessão apenas em memória e envia `REQUEST_SYNC`. No registro, envia `REGISTER`, aguarda `REGISTER_OK` e executa o login separado exigido pelo protocolo do servidor. No logout, envia `LOGOUT`, aguarda `LOGOUT_OK`, fecha a conexão e retorna à tela de login.
+No login, o cliente envia `LOGIN`, aguarda `AUTH_OK`, guarda a sessão apenas em memória e envia `REQUEST_SYNC`. No registro, envia `REGISTER` sem depender de e-mail, aguarda `REGISTER_OK` com o código de recuperação e executa o login separado exigido pelo protocolo do servidor; a tela do código é mantida apenas em memória e exibida uma única vez. No logout, envia `LOGOUT`, aguarda `LOGOUT_OK`, fecha a conexão e retorna à tela de login.
 
 Depois de uma queda de conexão, a camada de rede tenta reconectar com backoff limitado quando existe uma sessão em memória. Ao abrir o novo socket, envia `RECONNECT` com o `session_id`, aguarda `RECONNECT_OK` e envia `REQUEST_SYNC`. Em `SESSION_TAKEN`, a sessão é limpa e a UI volta ao login com mensagem compreensível.
 
 ## Protocolo usado
 
-A implementação usa somente `REGISTER`, `LOGIN`, `RECONNECT`, `REQUEST_SYNC`, `CHANGE_STATUS`, `SEND_MESSAGE`, `GET_HISTORY`, `CREATE_GROUP` e `LOGOUT`. Os eventos tratados são `SYNC_DATA`, `MESSAGE_ACK`, `MESSAGE`, `HISTORY`, `CONVERSATION_CREATED`, `USER_STATUS_CHANGED`, `SESSION_TAKEN` e `ERROR`.
+A implementação usa `REGISTER`, `LOGIN`, `RESET_PASSWORD`, `RECONNECT`, `REQUEST_SYNC`, `CHANGE_STATUS`, `SEND_MESSAGE`, `GET_HISTORY`, `CREATE_GROUP` e `LOGOUT`. O cadastro retorna um `recovery_code` transitório em `REGISTER_OK`; a recuperação envia `username`, `code` e `new_password` em `RESET_PASSWORD`. Os eventos tratados são `SYNC_DATA`, `MESSAGE_ACK`, `MESSAGE`, `HISTORY`, `CONVERSATION_CREATED`, `PASSWORD_RESET_OK`, `SESSION_TAKEN` e `ERROR`. SMTP/Gmail não participa desse fluxo.
 
 As mensagens não são adicionadas ao chat pelo clique. A HUB aguarda `MESSAGE_ACK` e então busca `GET_HISTORY`, garantindo que a linha exibida represente uma mensagem persistida. Eventos espontâneos `MESSAGE` também atualizam a conversa sem refresh.
 
@@ -42,26 +42,29 @@ As mensagens não são adicionadas ao chat pelo clique. A HUB aguarda `MESSAGE_A
 
 ## Validação realizada
 
-A validação foi executada com o servidor Python real em `127.0.0.1:8765`:
+A validação foi executada com o servidor Python real em `127.0.0.1:8765`, com banco temporário e sem variáveis SMTP:
 
 | Cenário | Resultado |
 |---|---|
-| Build inicial da HUB | Aprovado antes da integração |
-| TypeScript após integração | Aprovado com `pnpm check` |
-| Build final | Aprovado com `pnpm build` |
-| Assets locais e identidade visual | Aprovado visualmente no navegador |
-| Abrir tela de registro | Aprovado |
-| Criar conta pela HUB | Aprovado |
-| Login após reload | Aprovado; conta encontrada no SQLite do servidor |
-| Estado vazio sem conversas falsas | Aprovado |
-| Criar grupo pela HUB | Aprovado com duas contas reais de teste |
-| Enviar mensagem pela HUB | Aprovado; ACK e histórico do servidor atualizaram a UI |
-| Entrega em tempo real a outro cliente | Aprovado; o segundo cliente recebeu `MESSAGE` |
-| Alterar presença para Ausente | Aprovado com `CHANGE_STATUS` |
-| Logout | Aprovado com `LOGOUT_OK`, fechamento e retorno ao login |
-| Suíte do servidor Python | 45 testes aprovados |
+| TypeScript após a integração local | Aprovado com `pnpm check` |
+| Build final do Hub | Aprovado com `pnpm build` |
+| Abrir tela de cadastro | Aprovado; o formulário não solicita e-mail |
+| Criar conta pela Hub | Aprovado; `REGISTER_OK` entregou código local transitório |
+| Copiar código | Aprovado; confirmação visual exibida |
+| Checkbox e Continuar | Aprovado; Continuar ficou bloqueado até a confirmação |
+| Exibição única | Aprovado; após Continuar o código não foi reexibido |
+| Recuperação pela Hub | Aprovado visualmente; formulário usa username + código |
+| Reset local por WebSocket | Aprovado; senha alterada sem SMTP |
+| Hash no SQLite | Aprovado; apenas `code_hash` foi persistido |
+| Código reutilizado | Aprovado; segundo uso negado |
+| Código incorreto | Aprovado; mensagem genérica e contador de tentativas |
+| Três clientes simultâneos | Aprovado; sockets e chat permaneceram ativos |
+| Reinicialização | Aprovado; código e banco permaneceram válidos |
+| Contas antigas | Aprovado; código criado no primeiro login bem-sucedido |
+| Launcher e origem local | Aprovado; launcher sem alterações |
+| Suíte do servidor Python | 73 testes aprovados |
 
-As contas `hub_alice_20260822` e `hub_bob_20260822` foram criadas somente durante a validação manual no banco temporário e não são seed do código.
+O teste manual utilizou somente uma conta descartável em banco temporário. O código exibido não foi salvo em relatório, log ou arquivo do repositório.
 
 ## Limitações atuais
 

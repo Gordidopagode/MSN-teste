@@ -6,8 +6,9 @@ All writes are journal-guarded (WAL mode) and the connection is opened with
 foreign keys enabled.
 
 Schema:
-- users:        accounts + hashed credentials (never plaintext passwords)
-- sessions:     authenticated sessions (can outlive a connection)
+- users:         accounts + hashed credentials (never plaintext passwords)
+- sessions:      authenticated sessions (can outlive a connection)
+- recovery_codes: one-time recovery-code hashes and attempt state
 - conversations: 1:1 and group conversations
 - participants: m:n user <-> conversation membership
 - messages:     full message history
@@ -76,6 +77,15 @@ class Persistence:
         user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
         token_hash TEXT UNIQUE NOT NULL,
         expires_at TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        used_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS recovery_codes (
+        recovery_id TEXT PRIMARY KEY,
+        user_id TEXT UNIQUE NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        code_hash TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         used_at TEXT
@@ -244,6 +254,82 @@ class Persistence:
             conn.close()
 
     # -- password recovery ---------------------------------------------------
+
+    def create_recovery_code(self, recovery_id: str, user_id: str,
+                             code_hash: str, created_at: str) -> bool:
+        """Create one recovery-code record, without replacing an existing one."""
+        conn = self._conn()
+        try:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO recovery_codes "
+                "(recovery_id, user_id, code_hash, created_at) VALUES (?, ?, ?, ?)",
+                (recovery_id, user_id, code_hash, created_at),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    def get_recovery_code_for_user(self, user_id: str) -> Optional[dict[str, Any]]:
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM recovery_codes WHERE user_id = ? LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def increment_recovery_code_attempts(self, recovery_id: str) -> int:
+        conn = self._conn()
+        try:
+            conn.execute(
+                "UPDATE recovery_codes SET attempts = attempts + 1 "
+                "WHERE recovery_id = ? AND used_at IS NULL",
+                (recovery_id,),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT attempts FROM recovery_codes WHERE recovery_id = ?",
+                (recovery_id,),
+            ).fetchone()
+            return int(row["attempts"]) if row else 0
+        finally:
+            conn.close()
+
+    def complete_recovery_code(self, recovery_id: str, user_id: str,
+                               password_hash: str, used_at: str) -> bool:
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            record = conn.execute(
+                "SELECT recovery_id FROM recovery_codes "
+                "WHERE recovery_id = ? AND user_id = ? AND used_at IS NULL",
+                (recovery_id, user_id),
+            ).fetchone()
+            if record is None:
+                conn.rollback()
+                return False
+            updated = conn.execute(
+                "UPDATE users SET password_hash = ? WHERE user_id = ?",
+                (password_hash, user_id),
+            ).rowcount
+            if updated != 1:
+                conn.rollback()
+                return False
+            conn.execute(
+                "UPDATE recovery_codes SET used_at = ? WHERE recovery_id = ?",
+                (used_at, recovery_id),
+            )
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def delete_password_reset_tokens_for_user(self, user_id: str) -> None:
         conn = self._conn()

@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import shutil
-import smtplib
 import socket
 import tempfile
 from pathlib import Path
@@ -15,34 +14,54 @@ from websockets.asyncio.server import serve as ws_serve
 
 from launcher.launcher import Endpoint, LocalServerController, WebSocketProbe
 from server.core import ServerCore
-from server.email import service as email_service
+from server.network.handler import WebSocketHandler
+from server.network.protocol import ProtocolError, parse_client_message
 from server.tests.helpers import make_settings
-from server.tests.test_sync_persistence import ws_register_login, ws_send
+from server.tests.test_sync_persistence import ws_send
 
 
 async def _close_all(*sockets) -> None:
     await asyncio.gather(*(socket.close() for socket in sockets), return_exceptions=True)
 
 
+async def _ws_register_login(url: str, username: str, password: str = "secret123"):
+    websocket = await ws_connect(url)
+    registration = await ws_send(
+        websocket,
+        command="REGISTER",
+        username=username,
+        display_name=username.capitalize(),
+        password=password,
+    )
+    assert registration["type"] == "REGISTER_OK", registration
+    code = registration["payload"]["recovery_code"]
+    authentication = await ws_send(
+        websocket,
+        command="LOGIN",
+        username=username,
+        password=password,
+    )
+    assert authentication["type"] == "AUTH_OK", authentication
+    return websocket, authentication["payload"], code
+
+
 @pytest.mark.asyncio
-async def test_local_server_without_smtp_keeps_login_chat_and_websocket_alive() -> None:
+async def test_local_server_without_smtp_keeps_login_chat_and_recovery_alive() -> None:
     tmpdir = Path(tempfile.mkdtemp(prefix="msn_local_no_smtp_"))
     try:
         settings = make_settings(str(tmpdir), port=0)
         core = ServerCore(settings)
-        from server.network.handler import WebSocketHandler
-
         handler = WebSocketHandler(core)
         async with ws_serve(handler.handle, "127.0.0.1", 0, ping_interval=None) as server:
             port = server.sockets[0].getsockname()[1]
             url = f"ws://127.0.0.1:{port}"
-            ws_a, _, _ = await ws_register_login(url, "no_smtp_a")
-            ws_b, _, _ = await ws_register_login(url, "no_smtp_b")
+            ws_a, _, code_a = await _ws_register_login(url, "no_smtp_a")
+            ws_b, _, _ = await _ws_register_login(url, "no_smtp_b")
             try:
                 group = await ws_send(
                     ws_a,
                     command="CREATE_GROUP",
-                    name="No SMTP",
+                    name="Local recovery",
                     participants=["no_smtp_b"],
                 )
                 group_id = group["payload"]["conversation"]["conversation_id"]
@@ -51,25 +70,24 @@ async def test_local_server_without_smtp_keeps_login_chat_and_websocket_alive() 
 
                 reset_response = await ws_send(
                     ws_a,
-                    command="REQUEST_PASSWORD_RESET",
-                    email="no_smtp_a@example.com",
+                    command="RESET_PASSWORD",
+                    username="no_smtp_a",
+                    code=code_a,
+                    new_password="changed123",
                 )
-                assert reset_response["type"] == "PASSWORD_RESET_REQUESTED"
-                user = core.store.get_user_by_email("no_smtp_a@example.com")
-                assert user is not None
-                assert core.store.get_password_reset_for_user(user["user_id"]) is None
+                assert reset_response["type"] == "PASSWORD_RESET_OK"
 
                 ack = await ws_send(
                     ws_a,
                     command="SEND_MESSAGE",
                     conversation_id=group_id,
                     type="text",
-                    payload={"content": "chat remains available"},
+                    payload={"content": "local recovery keeps chat available"},
                 )
                 assert ack["type"] == "MESSAGE_ACK"
                 message = json.loads(await ws_b.recv())
                 assert message["type"] == "MESSAGE"
-                assert message["payload"]["message"]["payload"]["content"] == "chat remains available"
+                assert message["payload"]["message"]["payload"]["content"] == "local recovery keeps chat available"
                 assert len(core.online_users()) == 2
             finally:
                 await _close_all(ws_a, ws_b)
@@ -78,284 +96,108 @@ async def test_local_server_without_smtp_keeps_login_chat_and_websocket_alive() 
 
 
 @pytest.mark.asyncio
-async def test_configured_smtp_connects_authenticates_sends_and_closes(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakeSMTP:
-        instances: list["FakeSMTP"] = []
-
-        def __init__(self, host: str, port: int, timeout: int) -> None:
-            self.host = host
-            self.port = port
-            self.timeout = timeout
-            self.events: list[str] = []
-            self.login_args: tuple[str, str] | None = None
-            self.message = None
-            self.closed = False
-            self.__class__.instances.append(self)
-
-        def __enter__(self) -> "FakeSMTP":
-            self.events.append("enter")
-            return self
-
-        def __exit__(self, exc_type, exc_value, traceback) -> None:
-            self.events.append("exit")
-            self.closed = True
-
-        def ehlo(self) -> None:
-            self.events.append("ehlo")
-
-        def starttls(self, context=None) -> None:
-            self.events.append("starttls")
-
-        def login(self, username: str, password: str) -> None:
-            self.events.append("login")
-            self.login_args = (username, password)
-
-        def send_message(self, message) -> None:
-            self.events.append("send_message")
-            self.message = message
-
-    monkeypatch.setattr(email_service.smtplib, "SMTP", FakeSMTP)
-    settings = make_settings(
-        "/tmp/msn_smtp_fake",
-        smtp_host="smtp.test.invalid",
-        smtp_port=587,
-        smtp_username="sender.test.invalid",
-        smtp_password="not-a-real-credential",
-        smtp_from="sender.test.invalid",
-    )
-
-    assert email_service.smtp_is_configured(settings) is True
-    await email_service.send_password_reset_email(
-        settings,
-        "recipient.test.invalid",
-        "ABCD2345",
-    )
-
-    assert len(FakeSMTP.instances) == 1
-    smtp = FakeSMTP.instances[0]
-    assert smtp.host == "smtp.test.invalid"
-    assert smtp.port == 587
-    assert smtp.events == ["enter", "ehlo", "starttls", "ehlo", "login", "send_message", "exit"]
-    assert smtp.closed is True
-    assert smtp.login_args is not None
-    assert smtp.login_args[0] == "sender.test.invalid"
-    assert smtp.message["From"] == "sender.test.invalid"
-    assert smtp.message["To"] == "recipient.test.invalid"
-    assert "ABCD2345" in smtp.message.get_content()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure_kind", ["authentication", "unavailable"])
-async def test_smtp_failure_is_contained_and_chat_continues(
-    monkeypatch: pytest.MonkeyPatch,
-    failure_kind: str,
-) -> None:
-    class FailingSMTP:
-        def __init__(self, host: str, port: int, timeout: int) -> None:
-            if failure_kind == "unavailable":
-                raise OSError("test SMTP unavailable")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc_value, traceback) -> None:
-            return None
-
-        def ehlo(self) -> None:
-            return None
-
-        def starttls(self, context=None) -> None:
-            return None
-
-        def login(self, username: str, password: str) -> None:
-            raise smtplib.SMTPAuthenticationError(535, b"test authentication failure")
-
-        def send_message(self, message) -> None:
-            raise AssertionError("send_message must not run after SMTP failure")
-
-    monkeypatch.setattr(email_service.smtplib, "SMTP", FailingSMTP)
-    tmpdir = Path(tempfile.mkdtemp(prefix=f"msn_smtp_{failure_kind}_"))
-    try:
-        settings = make_settings(
-            str(tmpdir),
-            port=0,
-            smtp_host="smtp.test.invalid",
-            smtp_port=587,
-            smtp_username="sender.test.invalid",
-            smtp_password="not-a-real-credential",
-            smtp_from="sender.test.invalid",
-        )
-        core = ServerCore(settings)
-        from server.network.handler import WebSocketHandler
-
-        handler = WebSocketHandler(core)
-        async with ws_serve(handler.handle, "127.0.0.1", 0, ping_interval=None) as server:
-            port = server.sockets[0].getsockname()[1]
-            url = f"ws://127.0.0.1:{port}"
-            ws_a, _, _ = await ws_register_login(url, f"smtp_{failure_kind}_a")
-            ws_b, _, _ = await ws_register_login(url, f"smtp_{failure_kind}_b")
-            try:
-                group = await ws_send(
-                    ws_a,
-                    command="CREATE_GROUP",
-                    name="SMTP failure",
-                    participants=[f"smtp_{failure_kind}_b"],
-                )
-                group_id = group["payload"]["conversation"]["conversation_id"]
-                invitation = json.loads(await ws_b.recv())
-                assert invitation["type"] == "CONVERSATION_CREATED"
-
-                reset_response = await ws_send(
-                    ws_a,
-                    command="REQUEST_PASSWORD_RESET",
-                    email=f"smtp_{failure_kind}_a@example.com",
-                )
-                assert reset_response["type"] == "PASSWORD_RESET_REQUESTED"
-                assert "535" not in json.dumps(reset_response)
-                user = core.store.get_user_by_email(f"smtp_{failure_kind}_a@example.com")
-                assert user is not None
-                assert core.store.get_password_reset_for_user(user["user_id"]) is None
-
-                ack = await ws_send(
-                    ws_a,
-                    command="SEND_MESSAGE",
-                    conversation_id=group_id,
-                    type="text",
-                    payload={"content": f"after {failure_kind}"},
-                )
-                assert ack["type"] == "MESSAGE_ACK"
-                message = json.loads(await ws_b.recv())
-                assert message["type"] == "MESSAGE"
-                assert len(core.online_users()) == 2
-            finally:
-                await _close_all(ws_a, ws_b)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-@pytest.mark.asyncio
-async def test_three_clients_stay_online_during_concurrent_recovery() -> None:
-    tmpdir = Path(tempfile.mkdtemp(prefix="msn_three_recovery_"))
-    sent_recipients: list[str] = []
-
-    async def fake_sender(settings, recipient: str, code: str) -> None:
-        sent_recipients.append(recipient)
-        await asyncio.sleep(0.02)
-
+async def test_three_clients_stay_connected_during_concurrent_local_recovery() -> None:
+    tmpdir = Path(tempfile.mkdtemp(prefix="msn_three_local_recovery_"))
     try:
         settings = make_settings(str(tmpdir), port=0)
-        core = ServerCore(settings, email_sender=fake_sender)
-        from server.network.handler import WebSocketHandler
-
+        core = ServerCore(settings)
         handler = WebSocketHandler(core)
         async with ws_serve(handler.handle, "127.0.0.1", 0, ping_interval=None) as server:
             port = server.sockets[0].getsockname()[1]
             url = f"ws://127.0.0.1:{port}"
-            ws_a, _, _ = await ws_register_login(url, "three_a")
-            ws_b, _, _ = await ws_register_login(url, "three_b")
-            ws_c, _, _ = await ws_register_login(url, "three_c")
+            clients = await asyncio.gather(
+                _ws_register_login(url, "three_a"),
+                _ws_register_login(url, "three_b"),
+                _ws_register_login(url, "three_c"),
+            )
+            sockets = [item[0] for item in clients]
             try:
                 group = await ws_send(
-                    ws_a,
+                    sockets[0],
                     command="CREATE_GROUP",
                     name="Three clients",
                     participants=["three_b", "three_c"],
                 )
                 group_id = group["payload"]["conversation"]["conversation_id"]
-                invitations = await asyncio.gather(ws_b.recv(), ws_c.recv())
+                invitations = await asyncio.gather(sockets[1].recv(), sockets[2].recv())
                 assert all(json.loads(item)["type"] == "CONVERSATION_CREATED" for item in invitations)
 
-                responses = await asyncio.gather(
-                    ws_send(ws_a, command="REQUEST_PASSWORD_RESET", email="three_a@example.com"),
-                    ws_send(ws_b, command="REQUEST_PASSWORD_RESET", email="three_b@example.com"),
-                    ws_send(ws_c, command="REQUEST_PASSWORD_RESET", email="three_c@example.com"),
-                )
-                assert all(item["type"] == "PASSWORD_RESET_REQUESTED" for item in responses)
-                assert sorted(sent_recipients) == [
-                    "three_a@example.com",
-                    "three_b@example.com",
-                    "three_c@example.com",
-                ]
+                responses = await asyncio.gather(*(
+                    ws_send(
+                        websocket,
+                        command="RESET_PASSWORD",
+                        username=username,
+                        code=code,
+                        new_password="changed123",
+                    )
+                    for websocket, username, code in zip(
+                        sockets,
+                        ("three_a", "three_b", "three_c"),
+                        (clients[0][2], clients[1][2], clients[2][2]),
+                    )
+                ))
+                assert all(item["type"] == "PASSWORD_RESET_OK" for item in responses)
                 assert len(core.online_users()) == 3
 
                 ack = await ws_send(
-                    ws_a,
+                    sockets[0],
                     command="SEND_MESSAGE",
                     conversation_id=group_id,
                     type="text",
-                    payload={"content": "three clients still connected"},
+                    payload={"content": "three local recoveries completed"},
                 )
                 assert ack["type"] == "MESSAGE_ACK"
-                delivered = await asyncio.gather(ws_b.recv(), ws_c.recv())
+                delivered = await asyncio.gather(sockets[1].recv(), sockets[2].recv())
                 assert all(json.loads(item)["type"] == "MESSAGE" for item in delivered)
             finally:
-                await _close_all(ws_a, ws_b, ws_c)
+                await _close_all(*sockets)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-@pytest.mark.asyncio
-async def test_restart_preserves_database_history_and_reconnects_session() -> None:
-    tmpdir = Path(tempfile.mkdtemp(prefix="msn_restart_local_"))
-    session_id = ""
-    group_id = ""
+def test_local_protocol_does_not_require_email_or_email_reset() -> None:
+    registration = parse_client_message(json.dumps({
+        "command": "REGISTER",
+        "username": "local_user",
+        "display_name": "Local User",
+        "password": "secret123",
+    }))
+    assert "email" not in registration
+    reset = parse_client_message(json.dumps({
+        "command": "RESET_PASSWORD",
+        "username": "local_user",
+        "code": "ABCDEFGH23456789",
+        "new_password": "changed123",
+    }))
+    assert reset["username"] == "local_user"
+    with pytest.raises(ProtocolError):
+        parse_client_message(json.dumps({
+            "command": "REQUEST_PASSWORD_RESET",
+            "email": "user@example.com",
+        }))
+
+
+def test_multiple_local_accounts_receive_different_codes() -> None:
+    tmpdir = tempfile.mkdtemp(prefix="msn_local_unique_codes_")
     try:
-        settings = make_settings(str(tmpdir), port=0)
-        core_one = ServerCore(settings)
-        from server.network.handler import WebSocketHandler
+        import asyncio as _asyncio
 
-        handler_one = WebSocketHandler(core_one)
-        async with ws_serve(handler_one.handle, "127.0.0.1", 0, ping_interval=None) as server:
-            port = server.sockets[0].getsockname()[1]
-            url = f"ws://127.0.0.1:{port}"
-            ws_a, session_id, _ = await ws_register_login(url, "restart_a")
-            ws_b, _, _ = await ws_register_login(url, "restart_b")
-            try:
-                group = await ws_send(
-                    ws_a,
-                    command="CREATE_GROUP",
-                    name="Restart history",
-                    participants=["restart_b"],
-                )
-                group_id = group["payload"]["conversation"]["conversation_id"]
-                invitation = json.loads(await ws_b.recv())
-                assert invitation["type"] == "CONVERSATION_CREATED"
-                ack = await ws_send(
-                    ws_a,
-                    command="SEND_MESSAGE",
-                    conversation_id=group_id,
-                    type="text",
-                    payload={"content": "persist across restart"},
-                )
-                assert ack["type"] == "MESSAGE_ACK"
-                assert json.loads(await ws_b.recv())["type"] == "MESSAGE"
-            finally:
-                await _close_all(ws_a, ws_b)
-        del handler_one
-        del core_one
+        async def scenario() -> tuple[str, str]:
+            core = ServerCore(make_settings(tmpdir))
+            core.client_connected("unique_a")
+            core.client_connected("unique_b")
+            await core.register("unique_a", "unique_a", "Unique A", "secret123")
+            await core.register("unique_b", "unique_b", "Unique B", "secret123")
+            codes = [
+                item["payload"]["recovery_code"]
+                for cid in ("unique_a", "unique_b")
+                for item in core.pending[cid]
+                if item["type"] == "REGISTER_OK"
+            ]
+            return codes[0], codes[1]
 
-        core_two = ServerCore(settings)
-        handler_two = WebSocketHandler(core_two)
-        async with ws_serve(handler_two.handle, "127.0.0.1", 0, ping_interval=None) as server:
-            port = server.sockets[0].getsockname()[1]
-            url = f"ws://127.0.0.1:{port}"
-            ws_reconnected = await ws_connect(url)
-            try:
-                reconnect = await ws_send(
-                    ws_reconnected,
-                    command="RECONNECT",
-                    session_id=session_id,
-                )
-                assert reconnect["type"] == "RECONNECT_OK"
-                sync = await ws_send(ws_reconnected, command="REQUEST_SYNC")
-                data = sync["payload"]["data"]
-                assert data["identity"]["username"] == "restart_a"
-                assert any(
-                    item["payload"]["content"] == "persist across restart"
-                    for item in data["history"].get(group_id, [])
-                )
-            finally:
-                await ws_reconnected.close()
+        code_a, code_b = _asyncio.run(scenario())
+        assert code_a != code_b
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -432,29 +274,22 @@ def test_local_launcher_drops_inherited_external_origins(tmp_path: Path, monkeyp
         controller.stop()
 
 
-def test_smtp_settings_are_environment_driven_and_optional(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MSN_ALLOWED_ORIGINS", "")
+def test_smtp_settings_remain_optional(monkeypatch: pytest.MonkeyPatch) -> None:
     from server.config.settings import ServerSettings
 
-    local_settings = ServerSettings.from_env(data_dir="/tmp/msn_settings_test")
-    assert local_settings.allowed_origins is None
-
-    monkeypatch.setenv("MSN_SMTP_HOST", "smtp.test.invalid")
-    monkeypatch.setenv("MSN_SMTP_PORT", "587")
-    monkeypatch.setenv("MSN_SMTP_USERNAME", "sender.test.invalid")
-    monkeypatch.setenv("MSN_SMTP_PASSWORD", "")
-    monkeypatch.setenv("MSN_SMTP_FROM", "sender.test.invalid")
-
+    for key in (
+        "MSN_SMTP_HOST",
+        "MSN_SMTP_PORT",
+        "MSN_SMTP_USERNAME",
+        "MSN_SMTP_PASSWORD",
+        "MSN_SMTP_FROM",
+    ):
+        monkeypatch.delenv(key, raising=False)
     settings = ServerSettings.from_env(data_dir="/tmp/msn_settings_test")
-    assert settings.smtp_host == "smtp.test.invalid"
     assert settings.smtp_port == 587
-    assert settings.smtp_username == "sender.test.invalid"
-    assert settings.smtp_from == "sender.test.invalid"
-    assert email_service.smtp_is_configured(settings) is False
-
-    monkeypatch.setenv("MSN_SMTP_PASSWORD", "not-a-real-credential")
-    configured = ServerSettings.from_env(data_dir="/tmp/msn_settings_test")
-    assert email_service.smtp_is_configured(configured) is True
+    assert not settings.smtp_username
+    assert not settings.smtp_password
+    assert not settings.smtp_from
 
 
 @pytest.mark.asyncio

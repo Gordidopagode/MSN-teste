@@ -140,6 +140,17 @@ input::placeholder { color: #94a6af; }
 .auth-side-copy > p:not(.side-kicker) { margin: 26px 0 5px; color: #6c8b99; font-size: 11px; }
 .auth-side-copy code { color: #2e617a; font-family: Consolas, monospace; font-size: 12px; }
 
+/* One-time recovery code */
+.recovery-code-card { max-width: 360px; margin: 23px 0 0 70px; padding: 18px; display: grid; justify-items: center; gap: 12px; border: 1px solid #b7cdd8; border-radius: 5px; background: linear-gradient(180deg, #fbfeff 0%, #edf7fa 100%); box-shadow: inset 0 1px rgba(255,255,255,0.9), 0 3px 7px rgba(43, 89, 112, 0.08); }
+.recovery-code-label { color: #678493; font-size: 10px; text-transform: uppercase; letter-spacing: 0.12em; font-weight: 700; }
+.recovery-code-value { color: var(--blue-deep); font-family: Consolas, "Courier New", monospace; font-size: clamp(21px, 4vw, 28px); letter-spacing: 0.13em; line-height: 1.1; text-align: center; }
+.recovery-copy-button { min-height: 28px; display: inline-flex; align-items: center; gap: 5px; font-size: 10px; }
+.recovery-code-card .inline-success, .recovery-code-card .form-error { width: 100%; box-sizing: border-box; margin: 0; text-align: center; }
+.recovery-code-confirm { max-width: 360px; margin: 15px 0 0 70px; display: flex; align-items: flex-start; gap: 8px; color: #537584; font-size: 11px; line-height: 1.4; cursor: pointer; }
+.recovery-code-confirm input { width: 15px; height: 15px; margin: 0; accent-color: var(--blue); }
+.recovery-continue-button { max-width: 360px; margin: 13px 0 0 70px; }
+.recovery-warning { max-width: 360px; margin: 11px 0 0 70px; line-height: 1.4; white-space: normal; }
+
 /* Presence */
 .status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; border: 1px solid rgba(255,255,255,0.9); box-shadow: 0 0 0 1px rgba(45, 80, 95, 0.14); }
 .status-online { background: var(--green); }

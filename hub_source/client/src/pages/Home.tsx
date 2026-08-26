@@ -11,10 +11,10 @@ import {
   Check,
   ChevronDown,
   CircleHelp,
+  Copy,
   KeyRound,
   LogIn,
   LogOut,
-  Mail,
   MessageCircle,
   MoreHorizontal,
   Paperclip,
@@ -184,8 +184,8 @@ function AuthView({
   onClearError,
 }: {
   mode: "login" | "register";
-  onLogin: (username: string, password: string) => Promise<void>;
-  onRegister: (username: string, displayName: string, email: string, password: string) => Promise<void>;
+  onLogin: (username: string, password: string) => Promise<string | null>;
+  onRegister: (username: string, displayName: string, password: string) => Promise<void>;
   onForgot: () => void;
   onOpenRegister?: () => void;
   onBack: () => void;
@@ -195,7 +195,6 @@ function AuthView({
 }) {
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
-  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
@@ -215,16 +214,12 @@ function AuthView({
         setLocalError("Informe como você quer ser chamado.");
         return;
       }
-      if (!email.trim() || !email.includes("@")) {
-        setLocalError("Informe um e-mail válido para recuperar sua conta.");
-        return;
-      }
       if (password !== confirmPassword) {
         setLocalError("A confirmação de senha não coincide.");
         return;
       }
       try {
-        await onRegister(username, displayName, email, password);
+        await onRegister(username, displayName, password);
       } catch (submitError) {
         setLocalError(submitError instanceof Error ? submitError.message : "Não foi possível criar a conta.");
       }
@@ -277,16 +272,6 @@ function AuthView({
                   placeholder="ex.: Maria Clara"
                   value={displayName}
                   onChange={setDisplayName}
-                />
-              )}
-              {isRegister && (
-                <Field
-                  label="E-mail para recuperação"
-                  icon={<Mail size={15} />}
-                  type="email"
-                  placeholder="voce@gmail.com"
-                  value={email}
-                  onChange={setEmail}
                 />
               )}
               <Field
@@ -343,50 +328,117 @@ function AuthView({
   );
 }
 
+function RecoveryCodeView({
+  code,
+  onContinue,
+}: {
+  code: string;
+  onContinue: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+
+  async function copyCode() {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(code);
+      } else {
+        const helper = document.createElement("textarea");
+        helper.value = code;
+        helper.setAttribute("readonly", "");
+        helper.style.position = "fixed";
+        helper.style.opacity = "0";
+        document.body.appendChild(helper);
+        helper.select();
+        const didCopy = document.execCommand("copy");
+        helper.remove();
+        if (!didCopy) throw new Error("copy-failed");
+      }
+      setCopied(true);
+      setCopyError(null);
+    } catch {
+      setCopied(false);
+      setCopyError("Não foi possível copiar automaticamente. Anote o código antes de continuar.");
+    }
+  }
+
+  return (
+    <main className="app-stage auth-stage">
+      <section className="messenger-window auth-window recovery-code-window" aria-label="Código de recuperação">
+        <WindowTopbar title="Código de recuperação" subtitle="guarde este código com cuidado" />
+        <div className="auth-content">
+          <div className="auth-form-area">
+            <div className="auth-brand-row">
+              <img className="brand-mark" src={messengerMark} alt="Marca do Messenger" />
+              <div>
+                <p className="eyebrow">conta criada</p>
+                <h1>Ei! Aqui está seu código.</h1>
+                <p className="auth-intro">Ele será mostrado somente agora. Guarde-o em um lugar seguro para recuperar sua senha no futuro.</p>
+              </div>
+            </div>
+            <div className="recovery-code-card">
+              <span className="recovery-code-label">Seu código de recuperação</span>
+              <strong className="recovery-code-value" aria-label="Código de recuperação">{code}</strong>
+              <button className="small-button recovery-copy-button" type="button" onClick={() => void copyCode()}>
+                <Copy size={13} /> {copied ? "Código copiado" : "Copiar código"}
+              </button>
+              {copied && <p className="inline-success" role="status">Código copiado para a área de transferência.</p>}
+              {copyError && <p className="form-error" role="alert">{copyError}</p>}
+            </div>
+            <label className="recovery-code-confirm">
+              <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
+              <span>Já guardei meu código em um lugar seguro.</span>
+            </label>
+            <button className="primary-button recovery-continue-button" type="button" disabled={!confirmed} onClick={onContinue}>
+              <Check size={16} /> Continuar
+            </button>
+            <p className="mini-note recovery-warning"><ShieldCheck size={13} /> se esta tela for fechada antes de guardar o código, ele não será mostrado novamente</p>
+          </div>
+          <aside className="auth-side" aria-label="Proteção do código">
+            <img className="auth-orbit" src={messengerOrbit} alt="" />
+            <div className="auth-side-copy">
+              <p className="side-kicker"><ShieldCheck size={13} /> proteção da conta</p>
+              <div className="connection-line"><StatusDot status="online" /> <strong>uma única exibição</strong></div>
+              <p>O servidor guarda apenas o hash do código. Nem o código original nem a senha são salvos em texto puro.</p>
+            </div>
+            <img className="auth-badge" src={messengerBadge} alt="" />
+          </aside>
+        </div>
+      </section>
+    </main>
+  );
+}
+
 function PasswordRecoveryView({
-  onRequest,
   onReset,
   onBack,
   busy,
   error,
   onClearError,
 }: {
-  onRequest: (email: string) => Promise<void>;
-  onReset: (email: string, code: string, newPassword: string) => Promise<void>;
+  onReset: (username: string, code: string, newPassword: string) => Promise<void>;
   onBack: () => void;
   busy: boolean;
   error: string | null;
   onClearError: () => void;
 }) {
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [code, setCode] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [requested, setRequested] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
-
-  async function requestCode(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setLocalError(null);
-    onClearError();
-    if (!email.trim() || !email.includes("@")) {
-      setLocalError("Informe o e-mail usado no cadastro.");
-      return;
-    }
-    try {
-      await onRequest(email.trim());
-      setRequested(true);
-    } catch (requestError) {
-      setLocalError(requestError instanceof Error ? requestError.message : "Não foi possível solicitar o código.");
-    }
-  }
 
   async function finishReset(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLocalError(null);
     onClearError();
+    if (!username.trim()) {
+      setLocalError("Informe seu nome de usuário.");
+      return;
+    }
     if (!code.trim()) {
-      setLocalError("Informe o código recebido por e-mail.");
+      setLocalError("Informe seu código de recuperação.");
       return;
     }
     if (newPassword.length < 6) {
@@ -398,7 +450,7 @@ function PasswordRecoveryView({
       return;
     }
     try {
-      await onReset(email.trim(), code, newPassword);
+      await onReset(username.trim(), code, newPassword);
       onBack();
     } catch (resetError) {
       setLocalError(resetError instanceof Error ? resetError.message : "Não foi possível trocar a senha.");
@@ -409,51 +461,38 @@ function PasswordRecoveryView({
   return (
     <main className="app-stage auth-stage">
       <section className="messenger-window auth-window" aria-label="Recuperar senha do Messenger">
-        <WindowTopbar title="Recuperar acesso" subtitle="código temporário por e-mail" onClose={onBack} />
+        <WindowTopbar title="Recuperar acesso" subtitle="código local de recuperação" onClose={onBack} />
         <div className="auth-content">
           <div className="auth-form-area">
             <div className="auth-brand-row">
               <img className="brand-mark" src={messengerMark} alt="Marca do Messenger" />
               <div>
                 <p className="eyebrow">recuperação segura</p>
-                <h1>{requested ? "Digite o código recebido." : "Vamos recuperar sua conta."}</h1>
-                <p className="auth-intro">
-                  {requested
-                    ? "O código é temporário, de uso único e expira em poucos minutos."
-                    : "Informe o e-mail cadastrado para receber um código de troca de senha."}
-                </p>
+                <h1>Use seu código de recuperação.</h1>
+                <p className="auth-intro">Digite o username e o código que apareceram quando sua conta foi criada.</p>
               </div>
             </div>
 
-            {!requested ? (
-              <form className="form-stack" onSubmit={(event) => void requestCode(event)}>
-                <Field label="E-mail cadastrado" icon={<Mail size={15} />} type="email" placeholder="voce@gmail.com" value={email} onChange={setEmail} />
-                {visibleError && <div className="form-error" role="alert">{visibleError}</div>}
-                <button className="primary-button" type="submit" disabled={busy}><Mail size={16} /> {busy ? "Enviando..." : "Enviar código"}</button>
-                <p className="mini-note"><ShieldCheck size={13} /> por segurança, a resposta é igual para e-mails cadastrados ou não</p>
-              </form>
-            ) : (
-              <form className="form-stack" onSubmit={(event) => void finishReset(event)}>
-                <Field label="E-mail cadastrado" icon={<Mail size={15} />} type="email" placeholder="voce@gmail.com" value={email} onChange={setEmail} />
-                <Field label="Código temporário" icon={<KeyRound size={15} />} placeholder="ex.: A7K2M9QX" value={code} onChange={setCode} />
-                <Field label="Nova senha" icon={<KeyRound size={15} />} type="password" placeholder="••••••••" value={newPassword} onChange={setNewPassword} />
-                <Field label="Confirmar nova senha" icon={<ShieldCheck size={15} />} type="password" placeholder="Repita a senha" value={confirmPassword} onChange={setConfirmPassword} />
-                {visibleError && <div className="form-error" role="alert">{visibleError}</div>}
-                <button className="primary-button" type="submit" disabled={busy}><ShieldCheck size={16} /> {busy ? "Salvando..." : "Trocar senha"}</button>
-                <button className="text-button" type="button" onClick={() => { setRequested(false); setCode(""); setLocalError(null); onClearError(); }}>Usar outro e-mail</button>
-              </form>
-            )}
+            <form className="form-stack" onSubmit={(event) => void finishReset(event)}>
+              <Field label="Nome de usuário" icon={<UserRound size={15} />} placeholder="ex.: seu_nome" value={username} onChange={setUsername} />
+              <Field label="Código de recuperação" icon={<KeyRound size={15} />} placeholder="ex.: KAHEB7UA2M4Q9XCD" value={code} onChange={setCode} />
+              <Field label="Nova senha" icon={<KeyRound size={15} />} type="password" placeholder="••••••••" value={newPassword} onChange={setNewPassword} />
+              <Field label="Confirmar nova senha" icon={<ShieldCheck size={15} />} type="password" placeholder="Repita a senha" value={confirmPassword} onChange={setConfirmPassword} />
+              {visibleError && <div className="form-error" role="alert">{visibleError}</div>}
+              <button className="primary-button" type="submit" disabled={busy}><ShieldCheck size={16} /> {busy ? "Salvando..." : "Trocar senha"}</button>
+              <p className="mini-note"><ShieldCheck size={13} /> sem e-mail e sem SMTP</p>
+            </form>
             <div className="auth-bottom-row">
               <button className="text-button" type="button" onClick={onBack}><ArrowLeft size={14} /> Voltar ao login</button>
-              <span className="mini-note"><Check size={13} /> senha nunca é enviada por e-mail</span>
+              <span className="mini-note"><Check size={13} /> uso único</span>
             </div>
           </div>
           <aside className="auth-side" aria-label="Recuperação de conta">
             <img className="auth-orbit" src={messengerOrbit} alt="" />
             <div className="auth-side-copy">
               <p className="side-kicker"><ShieldCheck size={13} /> proteção da conta</p>
-              <div className="connection-line"><StatusDot status="away" /> <strong>código de uso único</strong></div>
-              <p>O MSN não armazena o código original, apenas uma representação protegida até a expiração.</p>
+              <div className="connection-line"><StatusDot status="away" /> <strong>código guardado por você</strong></div>
+              <p>O MSN armazena somente uma representação protegida do código, nunca o código original.</p>
             </div>
             <img className="auth-badge" src={messengerBadge} alt="" />
           </aside>
@@ -839,8 +878,12 @@ function Hub() {
 
 export default function Home() {
   const [view, setView] = useState<ViewMode>("login");
-  const { session, login, register, requestPasswordReset, resetPassword, error, busy, clearError } = useMessenger();
+  const [recoveryCode, setRecoveryCode] = useState<string | null>(null);
+  const { session, login, register, resetPassword, error, busy, clearError } = useMessenger();
 
+  if (recoveryCode) {
+    return <RecoveryCodeView code={recoveryCode} onContinue={() => setRecoveryCode(null)} />;
+  }
   if (session) return <Hub />;
   if (view === "forgot") {
     return (
@@ -848,7 +891,6 @@ export default function Home() {
         busy={busy}
         error={error}
         onClearError={clearError}
-        onRequest={requestPasswordReset}
         onReset={resetPassword}
         onBack={() => { clearError(); setView("login"); }}
       />
@@ -863,9 +905,9 @@ export default function Home() {
         onClearError={clearError}
         onLogin={login}
         onForgot={() => setView("forgot")}
-        onRegister={async (username, displayName, email, password) => {
-          await register(username, displayName, email, password);
-          setView("hub");
+        onRegister={async (username, displayName, password) => {
+          const code = await register(username, displayName, password);
+          setRecoveryCode(code);
         }}
         onBack={() => { clearError(); setView("login"); }}
       />
@@ -878,8 +920,13 @@ export default function Home() {
       error={error}
       onClearError={clearError}
       onLogin={async (username, password) => {
-        await login(username, password);
-        setView("hub");
+        const code = await login(username, password);
+        if (code) {
+          setRecoveryCode(code);
+        } else {
+          setView("hub");
+        }
+        return code;
       }}
       onForgot={() => setView("forgot")}
       onOpenRegister={() => setView("register")}

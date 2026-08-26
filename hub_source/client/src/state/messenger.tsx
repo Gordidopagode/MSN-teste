@@ -11,6 +11,7 @@ import {
 import { MSN_SERVER_URL } from "@/network/config";
 import {
   AuthPayload,
+  RegistrationPayload,
   ConversationCreatedPayload,
   FriendshipPayload,
   FriendshipsUpdatedPayload,
@@ -100,10 +101,9 @@ export interface MessengerContextValue {
   conversations: Conversation[];
   friends: Friend[];
   presence: Record<string, PresencePayload>;
-  login: (username: string, password: string) => Promise<void>;
-  register: (username: string, displayName: string, email: string, password: string) => Promise<void>;
-  requestPasswordReset: (email: string) => Promise<void>;
-  resetPassword: (email: string, code: string, newPassword: string) => Promise<void>;
+  login: (username: string, password: string) => Promise<string | null>;
+  register: (username: string, displayName: string, password: string) => Promise<string>;
+  resetPassword: (username: string, code: string, newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
   changeStatus: (status: Status, statusMessage?: string) => Promise<void>;
   sendMessage: (conversationId: string, text: string) => Promise<void>;
@@ -634,7 +634,7 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
   handleMessageRef.current = handleMessage;
 
   const connectAndLogin = useCallback(
-    async (username: string, password: string): Promise<void> => {
+    async (username: string, password: string): Promise<string | null> => {
       client.setAutoReconnect(false);
       setError(null);
       await client.connect();
@@ -652,6 +652,7 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
       setSession(nextSession);
       client.setAutoReconnect(true);
       await request<SyncDataPayload>(["SYNC_DATA"], "REQUEST_SYNC");
+      return auth.recovery_code || null;
     },
     [client, request],
   );
@@ -674,10 +675,10 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
   connectedRef.current = connectedWithSession;
 
   const login = useCallback(
-    async (username: string, password: string) => {
+    async (username: string, password: string): Promise<string | null> => {
       setBusy(true);
       try {
-        await connectAndLogin(username.trim(), password);
+        return await connectAndLogin(username.trim(), password);
       } catch (loginError) {
         client.setAutoReconnect(false);
         client.close();
@@ -691,18 +692,18 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
   );
 
   const register = useCallback(
-    async (username: string, displayName: string, email: string, password: string) => {
+    async (username: string, displayName: string, password: string): Promise<string> => {
       setBusy(true);
       try {
         client.setAutoReconnect(false);
         await client.connect();
-        await request(["REGISTER_OK"], "REGISTER", {
+        const registration = await request<RegistrationPayload>(["REGISTER_OK"], "REGISTER", {
           username: username.trim(),
           display_name: displayName.trim(),
-          email: email.trim(),
           password,
         });
         await connectAndLogin(username.trim(), password);
+        return registration.recovery_code;
       } catch (registrationError) {
         client.setAutoReconnect(false);
         client.close();
@@ -715,30 +716,14 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
     [clearSession, client, connectAndLogin, request],
   );
 
-  const requestPasswordReset = useCallback(async (email: string) => {
+  const resetPassword = useCallback(async (username: string, code: string, newPassword: string) => {
     setBusy(true);
     setError(null);
     try {
       client.setAutoReconnect(false);
       await client.connect();
-      await request(["PASSWORD_RESET_REQUESTED"], "REQUEST_PASSWORD_RESET", {
-        email: email.trim(),
-      });
-    } catch (resetError) {
-      client.setAutoReconnect(false);
-      client.close();
-      throw asError(resetError);
-    } finally {
-      setBusy(false);
-    }
-  }, [client, request]);
-
-  const resetPassword = useCallback(async (email: string, code: string, newPassword: string) => {
-    setBusy(true);
-    setError(null);
-    try {
       await request(["PASSWORD_RESET_OK"], "RESET_PASSWORD", {
-        email: email.trim(),
+        username: username.trim(),
         code: code.trim(),
         new_password: newPassword,
       });
@@ -932,7 +917,6 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
       presence,
       login,
       register,
-      requestPasswordReset,
       resetPassword,
       logout,
       changeStatus,
@@ -959,7 +943,6 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
       error,
       login,
       logout,
-      requestPasswordReset,
       resetPassword,
       presence,
       reconnectNow,

@@ -143,15 +143,12 @@ class WebSocketHandler:
                 command["username"],
                 command["display_name"],
                 command["password"],
-                command["email"],
+                command.get("email"),
             )
-        elif cmd == "REQUEST_PASSWORD_RESET":
-            await self.core.request_password_reset(
-                connection_id, command["email"])
         elif cmd == "RESET_PASSWORD":
             await self.core.reset_password(
                 connection_id,
-                command["email"],
+                command["username"],
                 command["code"],
                 command["new_password"],
             )

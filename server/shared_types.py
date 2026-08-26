@@ -79,6 +79,10 @@ class User:
         self.password_hash = password_hash
         self.email = email
         self.created_at = created_at or now_iso()
+        # Filled only for the one-time recovery-code delivery path. It is
+        # deliberately excluded from serialization and cleared by the core
+        # before the object is retained by a manager.
+        self.recovery_code: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -119,6 +123,8 @@ class Session:
         self.user_id = user_id
         self.started_at = started_at or now_iso()
         self.last_seen_at = last_seen_at or self.started_at
+        # Transient only: never serialized or persisted with the session.
+        self.recovery_code: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -15,10 +15,11 @@ def server():
 @pytest.mark.asyncio
 async def test_register_and_login(server: FakeServer):
     cid = server.new_connection()
-    await server.core.register(cid, "alice", "Alice", "secret123", "alice@example.com")
+    await server.core.register(cid, "alice", "Alice", "secret123")
     ok = server.find(cid, "REGISTER_OK")
     assert len(ok) == 1
     assert ok[0]["payload"]["username"] == "alice"
+    assert len(ok[0]["payload"]["recovery_code"]) == 16
 
     await server.core.authenticate(cid, "alice", "secret123")
     auth_ok = server.find(cid, "AUTH_OK")
@@ -30,7 +31,7 @@ async def test_register_and_login(server: FakeServer):
 @pytest.mark.asyncio
 async def test_wrong_password(server: FakeServer):
     cid = server.new_connection()
-    await server.core.register(cid, "bob", "Bob", "secret123", "bob@example.com")
+    await server.core.register(cid, "bob", "Bob", "secret123")
     server.flush(cid)
     await server.core.authenticate(cid, "bob", "errada")
     errors = server.find(cid, "ERROR")
@@ -51,7 +52,7 @@ async def test_nonexistent_user(server: FakeServer):
 @pytest.mark.asyncio
 async def test_register_duplicate_username(server: FakeServer):
     cid = server.new_connection()
-    await server.core.register(cid, "carol", "Carol", "secret123", "carol@example.com")
+    await server.core.register(cid, "carol", "Carol", "secret123")
     server.flush(cid)
     await server.core.register(cid, "carol", "Carol 2", "senha456", "carol2@example.com")
     errors = server.find(cid, "ERROR")
@@ -62,18 +63,18 @@ async def test_register_duplicate_username(server: FakeServer):
 async def test_invalid_inputs(server: FakeServer):
     cid = server.new_connection()
     # empty username
-    await server.core.register(cid, "  ", "X", "secret123", "empty@example.com")
+    await server.core.register(cid, "  ", "X", "secret123")
     assert any(e["payload"]["code"] == "REGISTER_FAILED"
                for e in server.find(cid, "ERROR"))
     server.flush(cid)
     # short password
-    await server.core.register(cid, "dave", "Dave", "123", "dave@example.com")
+    await server.core.register(cid, "dave", "Dave", "123")
     assert any(e["payload"]["code"] == "REGISTER_FAILED"
                for e in server.find(cid, "ERROR"))
     server.flush(cid)
     # case-insensitive duplicate
-    await server.core.register(cid, "Carol", "Carol", "secret123", "carol3@example.com")
+    await server.core.register(cid, "Carol", "Carol", "secret123")
     server.flush(cid)
-    await server.core.register(cid, "CAROL", "Carol", "secret123", "carol4@example.com")
+    await server.core.register(cid, "CAROL", "Carol", "secret123")
     assert any(e["payload"]["code"] == "REGISTER_FAILED"
                for e in server.find(cid, "ERROR"))

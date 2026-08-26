@@ -26,10 +26,9 @@ class ProtocolError(Exception):
 
 # Expected client commands: command -> required keys (excluding 'command')
 CLIENT_COMMANDS: dict[str, tuple[str, ...]] = {
-    "REGISTER": ("username", "display_name", "password", "email"),
+    "REGISTER": ("username", "display_name", "password"),
     "LOGIN": ("username", "password"),
-    "REQUEST_PASSWORD_RESET": ("email",),
-    "RESET_PASSWORD": ("email", "code", "new_password"),
+    "RESET_PASSWORD": ("username", "code", "new_password"),
     "RECONNECT": ("session_id",),
     "REQUEST_SYNC": (),
     "CHANGE_STATUS": ("status",),
@@ -99,22 +98,19 @@ def parse_client_message(raw: Any) -> dict[str, Any]:
         _require_string(data, "password")
         if command == "REGISTER":
             _require_string(data, "display_name")
-            _require_string(data, "email")
-            out["email"] = data["email"]
-
-    elif command == "REQUEST_PASSWORD_RESET":
-        _require_string(data, "email")
-        out["email"] = data["email"]
+            if "email" in data:
+                _require_string(data, "email")
+                out["email"] = data["email"]
 
     elif command == "RESET_PASSWORD":
-        _require_string(data, "email")
+        _require_string(data, "username")
         _require_string(data, "code")
         _require_string(data, "new_password")
-        if len(data["code"].strip()) > 32:
+        if len(data["code"].strip()) > 64:
             raise ProtocolError("Código de recuperação inválido.")
         if len(data["new_password"]) > 1024:
             raise ProtocolError("A nova senha é muito longa.")
-        out["email"] = data["email"]
+        out["username"] = data["username"]
         out["code"] = data["code"]
         out["new_password"] = data["new_password"]
 

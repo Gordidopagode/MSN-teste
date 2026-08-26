@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 import secrets
-from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Optional
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 from server.auth.security import hash_password, verify_password
-from server.email.service import EmailDeliveryError, send_password_reset_email
 from server.shared_types import Session, User, new_id, now_iso
 
 log = logging.getLogger("msn.auth")
 
 _EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}$")
-_RESET_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+_RECOVERY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+_RECOVERY_CODE_LENGTH = 16
 
 
 def _utcnow() -> datetime:
@@ -32,12 +32,11 @@ def _valid_email(email: str) -> bool:
     return bool(_EMAIL_RE.fullmatch(email))
 
 
-def _hash_reset_code(code: str) -> str:
-    return hashlib.sha256(code.encode("utf-8")).hexdigest()
-
-
-def _new_reset_code() -> str:
-    return "".join(secrets.choice(_RESET_ALPHABET) for _ in range(8))
+def _new_recovery_code() -> str:
+    return "".join(
+        secrets.choice(_RECOVERY_ALPHABET)
+        for _ in range(_RECOVERY_CODE_LENGTH)
+    )
 
 
 class AuthError(Exception):
@@ -45,38 +44,38 @@ class AuthError(Exception):
     pass
 
 
-EmailSender = Callable[[Any, str, str], Awaitable[None]]
+@dataclass(frozen=True)
+class RegistrationResult:
+    user: User
+    recovery_code: str
 
 
 class AuthManager:
-    def __init__(self, store: Any, settings: Any, bus: Any,
-                 email_sender: EmailSender = send_password_reset_email) -> None:
+    def __init__(self, store: Any, settings: Any, bus: Any) -> None:
         self._store = store
         self._settings = settings
         self._bus = bus
-        self._email_sender = email_sender
-        self._reset_requests: dict[str, list[datetime]] = {}
 
     # -- registration --------------------------------------------------------
 
     async def register(self, username: str, display_name: str,
-                       password: str, email: str) -> User:
+                       password: str, email: Optional[str] = None) -> RegistrationResult:
         username = username.strip().lower()
         display_name = display_name.strip()[: self._settings.max_display_name_length]
-        email = _normalize_email(email)
+        email = _normalize_email(email) if email else None
 
-        if not username or not password or not email:
-            raise AuthError("Usuário, e-mail e senha são obrigatórios.")
+        if not username or not password:
+            raise AuthError("Usuário e senha são obrigatórios.")
         if len(username) > self._settings.max_username_length:
             raise AuthError(f"Nome de usuário muito longo (máx. {self._settings.max_username_length}).")
         if len(password) < 6:
             raise AuthError("A senha deve ter no mínimo 6 caracteres.")
-        if not _valid_email(email):
-            raise AuthError("Informe um e-mail válido para recuperar sua conta.")
+        if email is not None and not _valid_email(email):
+            raise AuthError("Informe um e-mail válido.")
 
         if self._store.get_user_by_username(username):
             raise AuthError("Este nome de usuário já está em uso.")
-        if self._store.get_user_by_email(email):
+        if email is not None and self._store.get_user_by_email(email):
             raise AuthError("Este e-mail já está vinculado a outra conta.")
 
         user = User(
@@ -90,7 +89,8 @@ class AuthManager:
             user.user_id, user.username, user.display_name,
             user.password_hash, user.created_at, user.email,
         )
-        return user
+        recovery_code = self._create_recovery_code(user.user_id)
+        return RegistrationResult(user=user, recovery_code=recovery_code)
 
     # -- login ---------------------------------------------------------------
 
@@ -111,100 +111,70 @@ class AuthManager:
         self._store.delete_user_sessions(row["user_id"])
 
         session = Session(session_id=new_id(), user_id=row["user_id"])
+        session.recovery_code = self._ensure_recovery_code(row["user_id"])
         self._store.upsert_session(
             session.session_id, session.user_id,
             session.started_at, session.last_seen_at,
         )
         return session
 
+    def _create_recovery_code(self, user_id: str) -> str:
+        for _ in range(5):
+            code = _new_recovery_code()
+            if self._store.create_recovery_code(
+                recovery_id=new_id(),
+                user_id=user_id,
+                code_hash=hash_password(code),
+                created_at=now_iso(),
+            ):
+                return code
+        raise AuthError("Não foi possível criar o código de recuperação.")
+
+    def _ensure_recovery_code(self, user_id: str) -> Optional[str]:
+        if self._store.get_recovery_code_for_user(user_id) is not None:
+            return None
+        try:
+            return self._create_recovery_code(user_id)
+        except AuthError:
+            # A concurrent login may have created the record between the
+            # initial lookup and the INSERT OR IGNORE. Do not fail login.
+            if self._store.get_recovery_code_for_user(user_id) is not None:
+                return None
+            raise
+
     # -- password recovery ---------------------------------------------------
 
-    async def request_password_reset(self, email: str) -> None:
-        """Create and email a short-lived code.
-
-        The method deliberately has the same externally observable result for a
-        missing address, an invalid address, an unconfigured SMTP service, and a
-        delivery failure. This avoids turning the public recovery form into an
-        account-enumeration oracle.
-        """
-        normalized_email = _normalize_email(email)
-        if not _valid_email(normalized_email):
-            return
-
-        now = _utcnow()
-        recent = [
-            request_time for request_time in self._reset_requests.get(normalized_email, [])
-            if now - request_time < timedelta(hours=1)
-        ]
-        if len(recent) >= self._settings.reset_requests_per_hour:
-            return
-        self._reset_requests[normalized_email] = recent + [now]
-
-        user = self._store.get_user_by_email(normalized_email)
-        if not user:
-            return
-
-        code = _new_reset_code()
-        created_at = _utcnow()
-        expires_at = created_at + timedelta(
-            minutes=self._settings.reset_token_ttl_minutes
-        )
-        self._store.delete_password_reset_tokens_for_user(user["user_id"])
-        self._store.create_password_reset(
-            reset_id=new_id(),
-            user_id=user["user_id"],
-            token_hash=_hash_reset_code(code),
-            expires_at=expires_at.isoformat(),
-            created_at=created_at.isoformat(),
-        )
-
-        try:
-            await self._email_sender(self._settings, normalized_email, code)
-        except EmailDeliveryError:
-            self._store.delete_password_reset_tokens_for_user(user["user_id"])
-            log.warning("Password reset email delivery failed for user id %s", user["user_id"])
-        except Exception:
-            self._store.delete_password_reset_tokens_for_user(user["user_id"])
-            log.exception("Unexpected password reset email failure for user id %s", user["user_id"])
-
-    async def reset_password(self, email: str, code: str,
+    async def reset_password(self, username: str, code: str,
                              new_password: str) -> str:
-        normalized_email = _normalize_email(email)
+        normalized_username = username.strip().lower()
         normalized_code = code.strip().upper()
-        if not _valid_email(normalized_email) or not normalized_code:
+        if not normalized_username or not normalized_code:
+            raise AuthError("Código inválido ou expirado.")
+        if len(normalized_code) > 64:
             raise AuthError("Código inválido ou expirado.")
         if len(new_password) < 6:
             raise AuthError("A nova senha deve ter no mínimo 6 caracteres.")
 
-        user = self._store.get_user_by_email(normalized_email)
+        user = self._store.get_user_by_username(normalized_username)
         if not user:
             raise AuthError("Código inválido ou expirado.")
 
-        token = self._store.get_password_reset_for_user(user["user_id"])
-        if token is None:
+        record = self._store.get_recovery_code_for_user(user["user_id"])
+        if record is None:
+            raise AuthError("Código inválido ou expirado.")
+        if record["used_at"] is not None:
+            raise AuthError("Código inválido ou expirado.")
+        if int(record["attempts"]) >= self._settings.reset_max_attempts:
             raise AuthError("Código inválido ou expirado.")
 
-        try:
-            expires_at = datetime.fromisoformat(token["expires_at"])
-        except (TypeError, ValueError):
-            expires_at = _utcnow() - timedelta(seconds=1)
-
-        if token["used_at"] is not None or _utcnow() >= expires_at:
-            self._store.delete_password_reset_tokens_for_user(user["user_id"])
-            raise AuthError("Código inválido ou expirado.")
-
-        if int(token["attempts"]) >= self._settings.reset_max_attempts:
-            self._store.delete_password_reset_tokens_for_user(user["user_id"])
-            raise AuthError("Código inválido ou expirado.")
-
-        if not secrets.compare_digest(token["token_hash"], _hash_reset_code(normalized_code)):
-            attempts = self._store.increment_password_reset_attempts(token["reset_id"])
+        if not verify_password(record["code_hash"], normalized_code):
+            attempts = self._store.increment_recovery_code_attempts(record["recovery_id"])
             if attempts >= self._settings.reset_max_attempts:
-                self._store.delete_password_reset_tokens_for_user(user["user_id"])
+                log.warning("Recovery-code attempt limit reached for user id %s", user["user_id"])
             raise AuthError("Código inválido ou expirado.")
 
-        completed = self._store.complete_password_reset(
-            token["reset_id"], user["user_id"],
+        completed = self._store.complete_recovery_code(
+            record["recovery_id"], user["user_id"],
             hash_password(new_password), now_iso(),
         )
         if not completed:

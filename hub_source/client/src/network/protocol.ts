@@ -1,6 +1,5 @@
 export type ServerMessageType =
   | "REGISTER_OK"
-  | "PASSWORD_RESET_REQUESTED"
   | "PASSWORD_RESET_OK"
   | "AUTH_OK"
   | "RECONNECT_OK"
@@ -22,7 +21,6 @@ export type ServerMessageType =
 export type ClientCommand =
   | "REGISTER"
   | "LOGIN"
-  | "REQUEST_PASSWORD_RESET"
   | "RESET_PASSWORD"
   | "RECONNECT"
   | "REQUEST_SYNC"
@@ -65,6 +63,12 @@ export interface IdentityPayload extends ProfilePayload {}
 
 export interface AuthPayload extends IdentityPayload {
   session_id: string;
+  recovery_code?: string;
+}
+
+export interface RegistrationPayload {
+  username: string;
+  recovery_code: string;
 }
 
 export interface PresencePayload extends Partial<ProfilePayload> {
