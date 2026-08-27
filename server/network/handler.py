@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 from typing import Any, Optional
 
 import websockets
@@ -99,7 +99,8 @@ class WebSocketHandler:
         user_id = query.get("user", [""])[0]
         expires = query.get("expires", [""])[0]
         signature = query.get("sig", [""])[0]
-        if not attachment_id or not self.core.attachments.verify_download_signature(attachment_id, user_id, expires, signature):
+        inline = query.get("inline", [""])[0]
+        if not attachment_id or not self.core.attachments.verify_download_signature(attachment_id, user_id, expires, signature, inline):
             return Response(403, "Forbidden", Headers({"Content-Type": "text/plain; charset=utf-8"}), b"Download not authorized")
         attachment = self.core.attachments.get_attachment(attachment_id)
         if attachment is None or not self.core.conversations.is_participant(attachment["conversation_id"], user_id):
@@ -109,10 +110,14 @@ class WebSocketHandler:
                 body = handle.read()
         except Exception:
             return Response(404, "Not Found", Headers({"Content-Type": "text/plain; charset=utf-8"}), b"Attachment not found")
+        filename = attachment["original_name"].replace('"', "_").replace("\r", "_").replace("\n", "_")
+        ascii_filename = "".join(char if 32 <= ord(char) < 127 else "_" for char in filename)
+        disposition = "inline" if inline == "1" and self.core.attachments.preview_kind(attachment) else "attachment"
+        content_disposition = f'{disposition}; filename="{ascii_filename}"; filename*=UTF-8\'\'{quote(filename, safe="!#$&+-.^_`|~")}'
         headers = Headers({
             "Content-Type": attachment["mime_type"],
             "Content-Length": str(len(body)),
-            "Content-Disposition": f'attachment; filename="{attachment["original_name"].replace(chr(34), "_")}"',
+            "Content-Disposition": content_disposition,
             "Cache-Control": "private, max-age=3600",
         })
         return Response(200, "OK", headers, body)

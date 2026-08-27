@@ -1,149 +1,181 @@
-# Relatório final — rodada integrada de melhorias do MSN
+# Relatório final de implementação — rodada integrada de melhorias
 
 ## 1. Escopo e preservações
 
-Esta rodada implementa a nova especificação integrada no repositório `Gordidopagode/MSN-teste`, branch `main`, sem alterar o launcher. O fluxo existente de descoberta do servidor, inicialização, escolha de host/join, conexão inicial do Hub, login, cadastro, recuperação local por código, WebSocket, mensagens de texto, conversas privadas e em grupo, amizades, sincronização, presença, avatar e status personalizado foi preservado.
+Esta rodada aplica a especificação anexada ao repositório `Gordidopagode/MSN-teste`, mantendo a arquitetura existente e sem modificar o launcher. O fluxo de descoberta do servidor, inicialização, escolha de host/join, conexão inicial do Hub, login, cadastro, recuperação local por código, WebSocket, mensagens de texto, conversas privadas e em grupo, amizades, sincronização, presença, avatar e status personalizado permanece funcional.
 
-A regra de distribuição do frontend também foi preservada: o Hub continua sendo compilado em `hub_source/client/public` e sincronizado para `client/public`, que é a pasta servida pelo launcher. A execução de `pnpm build` atualizou o bundle servido, mas `launcher/launcher.py` permaneceu sem qualquer modificação.
+O frontend continua sendo compilado em `hub_source/client/public` e sincronizado para `client/public`, a pasta realmente servida pelo launcher. O arquivo `launcher/launcher.py` permaneceu sem alteração. O build final atualizou somente os bundles estáticos e os códigos necessários para os recursos desta rodada.
 
-## 2. Arquitetura final e fontes de verdade
+## 2. Arquitetura e fontes de verdade
 
-O backend continua sendo um servidor Python assíncrono baseado em `websockets`. `server/network/handler.py` apenas traduz frames e despacha comandos; `server/core.py` coordena autenticação, autorização, presença, mensagens, anexos e broadcasts; os gerenciadores de domínio e `server/persistence/store.py` concentram regras e persistência.
+O backend continua baseado em Python assíncrono e WebSocket. `server/network/handler.py` traduz frames, valida comandos e despacha operações; `server/core.py` coordena autenticação, autorização, presença, mensagens, anexos, busca, pins e broadcasts; os gerenciadores de domínio e `server/persistence/store.py` concentram as regras persistentes.
 
-A presença tem uma fonte canônica no `PresenceManager` e nos snapshots `USER_STATUS_CHANGED`/`SYNC_DATA`. No frontend, o mapa `presence` é transformado por `useMemo` em `visibleFriends` e `visibleConversations`, e essas coleções são as que o contexto exporta para a UI. Assim, a lista de amigos, cabeçalho de conversa, participantes de grupo e avatar/status visualizam o mesmo estado, sem atualizações independentes de status em cada componente.
+A presença usa o `PresenceManager` como origem canônica. No frontend, o mapa `presence` é transformado em `visibleFriends` e `visibleConversations` por `useMemo`; a UI não mantém uma segunda cópia autoritativa de status. Assim, lista de amigos, cabeçalho de conversa, busca de usuários, grupos e participantes usam o mesmo estado de presença.
 
-| Domínio | Fonte final de verdade | Aplicação |
+| Domínio | Fonte de verdade | Comportamento final |
 |---|---|---|
-| Usuário e conta | `users` + `AuthManager` | Display name, senha, avatar normalizado e credenciais permanecem sob autoridade do backend. |
-| Presença | `PresenceManager` + `presence` no provider | Friends, cabeçalhos, busca e grupos derivam do mesmo mapa. |
-| Amizades | `friendships` + `FriendshipManager` | A lista de amigos aceitos alimenta prioritariamente o criador de grupos. |
-| Conversas | `conversations`/`conversation_participants` | Participação é sempre revalidada no backend. |
-| Mensagens | `messages` + `MessageManager` | `sender_id` é definido pela sessão autenticada, nunca pelo cliente. |
-| Anexos | Filesystem persistente + tabela `attachments` | O SQLite guarda metadados; os bytes não entram em JSON Base64. |
-| Pins | `pinned_messages` com unicidade por mensagem | Qualquer participante pode fixar/desafixar, sem duplicação. |
-| Notificações | fila local deduplicada no provider | Mensagens recebidas e transições de conexão geram avisos internos clicáveis. |
-| Preferências Hub | `localStorage` do navegador | Tema local não é tratado como dado de conta nem enviado ao servidor. |
+| Conta | `users` + `AuthManager` | Display name, senha e avatar são validados e persistidos no backend. |
+| Presença | `PresenceManager` + mapa `presence` | Amigos, conversas, busca e grupos refletem o mesmo status. |
+| Conversas | `conversations` e participantes | Participação é revalidada no servidor em cada operação sensível. |
+| Mensagens | `messages` + `MessageManager` | O remetente é derivado da sessão autenticada. |
+| Anexos | Filesystem privado + tabela `attachments` | Bytes ficam fora do JSON; SQLite guarda metadados e referência interna. |
+| Pins | `pinned_messages` | Relação única por conversa e mensagem, com operações idempotentes. |
+| Preferências do Hub | `localStorage` | Tema é local ao navegador e separado da conta. |
+| Notificações | Fila local deduplicada | Avisos de mensagens e conexão não são repetidos indefinidamente. |
 
-## 3. Problemas encontrados e decisões adotadas
+## 3. Busca, grupos e presença
 
-A auditoria inicial encontrou uma divergência potencial porque o frontend mantinha status derivados em `presence`, `friends`, `conversations` e sessão. A implementação passou a derivar as coleções apresentadas diretamente da presença canônica. Também foi identificado que a busca de usuários no backend já aceitava `username` e `display_name`, mas a UI comunicava apenas “username”; o texto e os resultados agora deixam explícitos nome exibido, `@username` e presença.
+A busca de usuários continua aceitando `username` e `display_name`. A interface apresenta nome exibido, `@username` e presença atual, mantendo o username como identificador operacional para amizade e abertura de conversa.
 
-A criação de grupos anteriormente dependia de texto livre separado por vírgulas. O Hub agora mostra amigos aceitos com nome amigável, `@username` e checkboxes, além de uma busca alternativa para usuários não amigos. O servidor resolve os usernames para IDs, remove duplicatas, rejeita auto-inclusão, rejeita lista vazia e continua decidindo autorização e participantes.
+O criador de grupos prioriza amigos aceitos por meio de seleção visual com nome amigável e `@username`. Uma busca alternativa permite adicionar usuários que não são amigos. O frontend remove duplicatas e impede a própria conta; o backend resolve usernames para IDs, rejeita participantes vazios, duplicados e auto-inclusão e continua sendo a autoridade final.
 
-Foi encontrada uma lacuna de segurança no fluxo de anexos: um cliente poderia tentar enviar `SEND_MESSAGE` com `type=attachment` e metadados inventados. O parser e o handler agora rejeitam esse caminho, e `MessageManager` somente aceita attachment quando `trusted_attachment=True`, flag usada exclusivamente por `ServerCore.finish_attachment_upload()` depois das verificações de conexão, proprietário, conversa e participação.
+A presença aparece de maneira consistente em amigos, conversas, busca e participantes. O frontend não deve ser tratado como autoridade para conceder acesso: abertura de conversa, criação de grupo, envio de mensagem, busca e anexos continuam sujeitos às verificações do backend.
 
-Outra limitação prática foi descoberta no teste do endpoint: o servidor `websockets` responde `426 Upgrade Required` a um GET HTTP comum no mesmo listener WebSocket. Em vez de tratar isso como download, foi criado um listener HTTP assíncrono separado para anexos, com a mesma autorização e o mesmo core. Isso mantém o launcher intacto e torna o caminho explícito: WebSocket em `MSN_PORT` e downloads em `MSN_ATTACHMENT_HTTP_PORT`.
+## 4. Protocolo e segurança
 
-## 4. Protocolo implementado
+Foram mantidos os comandos existentes e formalizados os fluxos de `BEGIN_ATTACHMENT_UPLOAD`, `FINISH_ATTACHMENT_UPLOAD`, `ABORT_ATTACHMENT_UPLOAD`, `SEARCH_MESSAGES`, `LIST_PINNED_MESSAGES`, `PIN_MESSAGE`, `UNPIN_MESSAGE`, `UPDATE_PROFILE` e `CHANGE_PASSWORD`. O comando genérico `SEND_MESSAGE` rejeita `type=attachment`; anexos somente são criados pelo caminho confiável de finalização de upload.
 
-Foram adicionados ou formalizados os seguintes comandos de cliente: `BEGIN_ATTACHMENT_UPLOAD`, `FINISH_ATTACHMENT_UPLOAD`, `ABORT_ATTACHMENT_UPLOAD`, `SEARCH_MESSAGES`, `LIST_PINNED_MESSAGES`, `PIN_MESSAGE`, `UNPIN_MESSAGE`, `UPDATE_PROFILE` e `CHANGE_PASSWORD`. O comando genérico `SEND_MESSAGE` continua exclusivo para mensagens de texto.
+Os envelopes de upload incluem `ATTACHMENT_UPLOAD_READY`, `ATTACHMENT_UPLOAD_PROGRESS` e `ATTACHMENT_UPLOAD_COMPLETE`. Também continuam disponíveis os envelopes de mensagem, histórico, pins, perfil, presença, sincronização e senha.
 
-Os envelopes novos incluem `ATTACHMENT_UPLOAD_READY`, `ATTACHMENT_UPLOAD_PROGRESS`, `ATTACHMENT_UPLOAD_COMPLETE`, `MESSAGE_SEARCH_RESULT`, `PINNED_MESSAGES`, `MESSAGE_PINNED` e `PASSWORD_CHANGED`. Os eventos existentes de `PROFILE_UPDATED`, `USER_STATUS_CHANGED`, `FRIENDSHIPS_UPDATED`, `MESSAGE`, `HISTORY` e `SYNC_DATA` foram mantidos e ampliados apenas onde necessário para transportar presença, avatar, display name, pins e URLs assinadas.
+As verificações principais são executadas no servidor:
 
-## 5. Anexos seguros e persistentes
+| Operação | Validações relevantes |
+|---|---|
+| Upload | Sessão autenticada, participação na conversa, tamanho, nome sanitizado, chunk válido e contagem de uploads. |
+| Finalização | Proprietário da sessão, vínculo do upload à conversa, participação atual, tamanho físico e hash SHA-256. |
+| Download | Assinatura HMAC, expiração, existência do anexo e participação do usuário na conversa. |
+| Mensagem de anexo | Somente `trusted_attachment=True` no caminho interno de finalização. |
+| Busca de mensagens | Sessão autenticada e participação na conversa. |
+| Pin/unpin | Participação na conversa, existência da mensagem e operação idempotente. |
+| Conta | Sessão própria, senha atual e validações de tamanho/formato. |
 
-O navegador inicia o upload com metadados (`filename`, MIME e tamanho). Depois da resposta `ATTACHMENT_UPLOAD_READY`, o `MessengerProvider` envia os bytes como frames binários em blocos de até `chunk_size`; nenhum arquivo é convertido para um grande campo Base64 em JSON. O servidor grava temporariamente em `<data_dir>/attachments/.uploads`, calcula SHA-256 ao concluir, move para um caminho interno aleatório e persiste os metadados em SQLite.
+Nenhuma senha SMTP, senha de usuário, token completo de recuperação ou segredo HMAC foi adicionado ao código, ao frontend, aos testes ou ao Git.
 
-A tabela `attachments` guarda `attachment_id`, conversa, proprietário, mensagem vinculada, nome original sanitizado, MIME validado, tamanho, referência de armazenamento, hash e data de criação. O padrão é 25 MiB por arquivo, 128 KiB por chunk e até três uploads em andamento por conexão. O MIME deve pertencer à lista permitida, o nome passa por `Path(...).name`, NUL e caracteres não imprimíveis são removidos, e referências de armazenamento são resolvidas e verificadas contra a raiz privada antes da abertura.
+## 5. Anexos genéricos, persistência e previews
 
-A mensagem armazena somente identificadores e metadados do anexo. Cada destinatário recebe URL HMAC própria, com usuário e expiração de uma hora na assinatura. O listener HTTP valida a assinatura, procura o attachment persistido e confirma que o usuário assinado pertence à conversa antes de ler o arquivo. O participante consegue baixar; um terceiro recebe `404`, mesmo que tente gerar uma assinatura válida para si. A limpeza de uploads pendentes ocorre em abort, finalização, erro, desconexão e substituição da sessão.
+O upload usa frames binários WebSocket em chunks, sem converter o arquivo inteiro para Base64 ou colocá-lo em um JSON grande. O servidor grava temporariamente em `<data_dir>/attachments/.uploads`, calcula SHA-256 ao concluir e move os bytes para um caminho interno aleatório. O nome informado pelo usuário é apenas um rótulo persistido e exibido; nunca é usado como caminho de filesystem.
 
-A configuração principal é:
+A tabela `attachments` mantém identificador, conversa, proprietário, mensagem vinculada, nome sanitizado, MIME, tamanho, referência interna, hash e data de criação. O SQLite não recebe URLs assinadas. Ao sincronizar ou entregar uma mensagem, o servidor recria a URL por destinatário e por sessão de leitura.
+
+A aceitação de MIME foi ampliada para arquivos genéricos. O valor é normalizado para um MIME sintaticamente válido ou `application/octet-stream`; não existe mais uma whitelist que bloqueie extensões legítimas. O limite padrão continua sendo 25 MiB por arquivo, com chunks de 128 KiB e até três uploads simultâneos por conexão. Nomes passam por normalização de separadores, remoção de NUL e caracteres não imprimíveis, limite de comprimento e armazenamento fora da raiz pública.
+
+O servidor identifica previews somente quando o conteúdo é compatível com a mídia declarada. Imagens são verificadas com Pillow, incluindo proteção contra imagem inválida ou decompression bomb. Vídeos são reconhecidos por assinaturas de contêiner comuns, como MP4/QuickTime, WebM/Matroska, AVI e Ogg. Quando a validação passa, o payload recebe `preview_kind` e uma `preview_url` assinada com modo inline. Caso contrário, o arquivo continua disponível como download genérico, sem tentativa de reprodução.
+
+| Tipo | Exibição no ChatView | Download |
+|---|---|---|
+| JPG/PNG e outras imagens reconhecidas | Preview inline com dimensões limitadas e lightbox ao clicar. | Link separado para baixar o original. |
+| MP4/WebM e outros vídeos reconhecidos | Player HTML5 com controles e limite visual de altura. | Link separado para baixar o original. |
+| PDF | Card compacto com categoria e tamanho. | Download forçado. |
+| ZIP/RAR/7z | Card de arquivo compactado. | Download forçado. |
+| TXT, código e texto | Card com extensão/categoria. | Download forçado. |
+| DOCX, planilhas e apresentações | Card com categoria legível. | Download forçado. |
+| Extensão ou MIME desconhecido | Card genérico, sem preview executável. | Download forçado. |
+
+O download usa um listener HTTP separado, pois um GET HTTP comum no listener WebSocket recebe `426 Upgrade Required`. A configuração padrão é:
 
 ```dotenv
 MSN_PORT=8765
 MSN_ATTACHMENT_HTTP_PORT=8766
 MSN_DATA_DIR=./data
-# Em HTTPS/proxy externo:
+MSN_ATTACHMENT_MAX_BYTES=26214400
+MSN_ATTACHMENT_CHUNK_BYTES=131072
+MSN_ATTACHMENT_MAX_PER_MESSAGE=3
+# Em hospedagem HTTPS/proxy:
 # MSN_PUBLIC_BASE_URL=https://seu-dominio.example
 ```
 
-Em hospedagem externa, a porta HTTP de anexos precisa ser exposta ou encaminhada pelo proxy. Para produção com HTTPS, `MSN_PUBLIC_BASE_URL` deve apontar para uma rota HTTPS que encaminhe `/attachments/` ao listener HTTP de anexos; não se deve usar um link HTTP em uma página HTTPS por causa de mixed content.
+Em hospedagem externa, a rota `/attachments/` deve ser encaminhada para o listener HTTP de anexos e `MSN_PUBLIC_BASE_URL` deve apontar para uma origem HTTPS acessível pelo navegador. O servidor ainda lê o corpo completo na resposta HTTP, adequado ao limite de 25 MiB e ao MSN privado pequeno; uma implantação maior deve migrar para streaming ou storage dedicado.
 
-## 6. Busca de mensagens
+## 6. ChatView e experiência de anexos
 
-A busca é server-backed. `SEARCH_MESSAGES` exige autenticação e participação na conversa, aceita `query`, `limit` limitado a 100 e cursor `before`, e hidrata anexos com a URL assinada do usuário que pesquisou. A UI possui busca dentro da conversa, mostra resultados e, ao clicar, faz scroll até a mensagem e aplica destaque temporário.
+O ChatView agora renderiza anexos por categoria. Imagens possuem preview com `loading="lazy"`, botão de ampliação, lightbox com fechamento por clique fora e tecla Escape, além de download explícito. Vídeos possuem player com `controls` e `preload="metadata"`. Outros arquivos usam cards compactos com ícone, categoria, extensão, tamanho, nome truncado com tooltip e botão de download.
 
-A implementação atual usa `LOWER(payload) LIKE` no SQLite, o que atende texto e nomes de arquivos persistidos, mas ainda não é uma busca FTS/tokenizada. Não há stemming, ranking semântico ou busca nos bytes do arquivo; o conteúdo binário continua deliberadamente fora da camada textual.
+A interface continua mostrando progresso de chunks durante upload, sem criar requisições concorrentes ou converter bytes em Base64. A apresentação mantém a identidade visual azul clara do MSN e recebe superfícies adicionais apenas quando necessário para distinguir mídia, arquivo, download e lightbox.
 
-## 7. Mensagens fixadas
+## 7. Busca de mensagens e pins
 
-A tabela `pinned_messages` possui relação única por `conversation_id` e `message_id`, além de quem fixou e quando. O backend confirma participação, confirma que a mensagem existe na conversa e usa `INSERT OR IGNORE`/remoção idempotente. Qualquer participante de conversa privada ou grupo pode fixar e desafixar.
+A busca de mensagens é server-backed, limitada à conversa autorizada, paginável por cursor e com limite de resultados. A UI mostra resultados no contexto do ChatView; clicar em um resultado navega até a mensagem e aplica destaque temporário. A busca textual continua baseada em `LIKE` no SQLite, cobrindo texto e nomes de arquivos persistidos, mas não pesquisa bytes binários nem oferece ranking semântico.
 
-O Hub adicionou controle de pin por mensagem, painel de mensagens fixadas e atualização ao vivo para os participantes. Eventos de pin são hidratados por destinatário, o que preserva URLs assinadas corretas para anexos fixados. O histórico e o sync marcam `is_pinned`, e a UI não cria uma segunda cópia da mensagem.
+Pins são persistentes e idempotentes. Qualquer participante de conversa privada ou grupo pode fixar ou desafixar uma mensagem. A tabela possui unicidade por `conversation_id` e `message_id`; histórico, sync e eventos ao vivo carregam `is_pinned`. A UI não cria uma segunda mensagem ao atualizar o pin.
 
-## 8. Configurações de conta e Hub
+## 8. Configurações e temas
 
-O painel de configurações foi dividido visualmente em **Minha conta** e **Hub**. Minha conta contém display name, status personalizado, avatar e troca de senha. Hub contém preferências locais de tema claro, azul suave e escuro, persistidas em `localStorage` e reaplicadas ao abrir a interface.
+As configurações foram separadas em duas abas visíveis:
 
-O display name é validado e persistido pelo backend, continua sendo diferente do username e é distribuído por `PROFILE_UPDATED` e presença. A busca usa display name como critério, mas solicitações de amizade e criação de conversa continuam usando o username único como identificador operacional.
-
-A troca de senha exige a senha atual e uma nova senha com tamanho mínimo; o hash continua sendo gerado pelo mecanismo existente. Após sucesso, sessões persistidas e sessões vivas em memória, exceto a sessão corrente, são invalidadas/encerradas. O avatar continua separado dos anexos de conversa: o navegador aceita `image/*`, o backend valida os bytes com Pillow e normaliza para JPEG seguro com limites de tamanho e dimensão.
-
-## 9. Notificações
-
-Foi adicionada uma fila interna de até cinco notificações, com IDs deduplicados e limite de retenção dos IDs já vistos. Mensagens recebidas de outros usuários geram um aviso com remetente e prévia; perda e recuperação real da conexão geram avisos de estado. O aviso de mensagem é clicável e seleciona a conversa correspondente. Não foi adicionada dependência de notificações push do sistema operacional nem pedido automático de permissão do navegador.
-
-## 10. Arquivos modificados
-
-### Arquivos de aplicação modificados
-
-| Arquivo | Finalidade |
+| Seção | Recursos |
 |---|---|
-| `.env.example` | Documenta `MSN_ATTACHMENT_HTTP_PORT` e `MSN_PUBLIC_BASE_URL`; nenhum segredo foi incluído. |
-| `hub_source/client/src/index.css` | Estilos incrementais de settings, grupos, busca, anexos, pins, temas e notificações. |
-| `hub_source/client/src/network/protocol.ts` | Tipos de anexos, busca, pins, presença e envelopes de conta. |
-| `hub_source/client/src/network/websocket.ts` | Envio de frames binários. |
-| `hub_source/client/src/pages/Home.tsx` | UI de configurações separadas, busca, grupos, ChatView, anexos, pins e notificações. |
-| `hub_source/client/src/state/messenger.tsx` | APIs do provider, presença derivada, upload binário, busca, pins, conta e fila de notificações. |
-| `server/auth/manager.py` | Atualização de display name e troca segura de senha. |
-| `server/config/settings.py` | Limites de anexos, porta HTTP e URL pública. |
-| `server/core.py` | Orquestração, autorização, distribuição e limpeza dos novos fluxos. |
-| `server/main.py` | Inicialização e encerramento do listener HTTP de anexos. |
-| `server/messages/manager.py` | Bloqueio de attachment forjado no envio genérico. |
-| `server/network/handler.py` | Frames binários, comandos novos e fechamento de handles de download. |
-| `server/network/protocol.py` | Parsing/validação dos novos comandos e rejeição de attachment genérico. |
-| `server/persistence/store.py` | Schema e APIs de attachments, busca e pins. |
-| `server/shared_types.py` | Tipo `MessageType.ATTACHMENT`. |
-| `server/sync/manager.py` | Hidratação de URLs assinadas no sync/histórico. |
-| `server/tests/test_sync_persistence.py` | Caso E2E real com grupo, upload, download, busca e pin. |
+| Minha conta | Display name, status personalizado, avatar, troca de senha e saída. |
+| Hub | Tema claro, azul suave e escuro, persistido localmente. |
 
-O build também atualizou `hub_source/client/public/index.html` e `client/public/index.html`, substituiu os assets hashados antigos em `client/public/assets/` pelos novos assets e sincronizou o bundle final para a pasta realmente servida pelo launcher.
+O painel deixou de ser um overlay flutuante sobre o chat. Ao abrir Perfil, ele ocupa o corpo interno inteiro do Messenger, possui cabeçalho próprio, botão `Voltar ao Hub`, rolagem interna e restauração do estado anterior ao retornar.
 
-### Arquivos criados
+O modo escuro foi refinado com gradientes no fundo, superfícies grafite em camadas, bordas azuladas e transparências moderadas. A identidade visual retrô continua presente e os controles mantêm contraste. O tema é reaplicado ao montar o Hub e ao reabrir configurações.
 
-| Arquivo | Finalidade |
+A troca de display name é autoritativa no backend e continua diferente do username. A troca de senha exige a senha atual, atualiza o hash e invalida sessões persistidas e sessões vivas em memória, preservando somente a sessão que confirmou a operação. O avatar continua separado dos anexos de conversa; o navegador aceita `image/*` e o servidor valida/normaliza a imagem com Pillow.
+
+## 9. Responsividade e validação visual
+
+As media queries existentes foram preservadas e ampliadas para configurações, cards de anexos, lightbox e tema escuro. Em viewport estreita, a tela de login reorganiza o painel lateral abaixo do formulário; o Hub colapsa suas colunas; a tela de configurações usa uma única coluna; previews e cards respeitam a largura disponível.
+
+Foi executada uma inspeção real em navegador local com o bundle final. O fluxo de login, cadastro descartável, recuperação local, entrada no Hub, abertura das configurações, alternância para dark mode, retorno ao Hub e reabertura do painel foram verificados. Também foi capturada e inspecionada uma viewport de 390×844; não houve overflow horizontal e os campos permaneceram utilizáveis.
+
+## 10. Arquivos modificados e criados nesta rodada
+
+| Arquivo | Alteração |
 |---|---|
-| `server/attachments/__init__.py` | Pacote do domínio de anexos. |
-| `server/attachments/manager.py` | Armazenamento, metadados, validações, chunks, HMAC e limpeza. |
-| `server/attachments/http.py` | Listener HTTP separado para downloads assinados. |
-| `server/tests/test_modern_features.py` | Testes de segurança, persistência, busca, pins e presença na busca. |
-| `RELATORIO_AUDITORIA_MELHORIAS.md` | Este relatório final. |
+| `.env.example` | Documentação de limites de anexos genéricos, porta HTTP e URL pública. |
+| `hub_source/client/src/index.css` | Tela completa de configurações, previews, lightbox, cards genéricos, dark mode e responsividade. |
+| `hub_source/client/src/network/protocol.ts` | Tipos `preview_url` e `preview_kind` para anexos. |
+| `hub_source/client/src/pages/Home.tsx` | Renderização de imagem/vídeo/arquivo, lightbox, Escape, tela interna de configurações e ajustes visuais. |
+| `server/attachments/http.py` | Assinatura inline, `Content-Disposition` seguro e nomes UTF-8. |
+| `server/attachments/manager.py` | MIME genérico, detecção segura de mídia, integridade física e limpeza reforçada. |
+| `server/core.py` | URLs de preview por destinatário e remoção de URLs transitórias do payload persistido. |
+| `server/network/handler.py` | Download inline seguro no endpoint legado e fechamento correto de handles. |
+| `server/network/protocol.py` | MIME vazio aceito para inferência/fallback e validação de upload. |
+| `server/sync/manager.py` | Reidratação de URLs sem reutilizar links transitórios persistidos. |
+| `server/tests/test_modern_features.py` | Matriz de nove tipos de arquivo, preview, download, persistência e ausência de URLs no SQLite. |
+| `server/tests/fixtures/tiny.mp4` | Fixture MP4 pequeno e válido para testar reconhecimento de vídeo. |
+| `client/public/` e `hub_source/client/public/` | Bundle final sincronizado; assets antigos gerados foram removidos. |
 
-## 11. Testes e resultados
+Os módulos de anexos, testes modernos, relatório e demais mudanças da rodada anterior continuam incluídos no estado final do repositório.
 
-A linha de base antes da rodada tinha 74 testes Python passando. Depois das mudanças, os resultados foram:
+## 11. Testes e resultados definitivos
+
+A linha de base anterior tinha 74 testes Python. Após esta rodada, a validação foi executada novamente:
 
 | Verificação | Resultado |
 |---|---:|
 | `python3 -m compileall -q server` | passou |
-| `PYTHONPATH=. pytest -q` | **81 passed, 0 failed** |
-| Novos testes unitários/integrados em `test_modern_features.py` | **6 passed** |
-| Novo E2E WebSocket moderno | **1 passed** |
-| E2E WebSocket existente de múltiplos clientes | passou dentro da suíte completa |
+| `PYTHONPATH=. pytest -q` | **82 passed, 0 failed** |
+| `server/tests/test_modern_features.py` | **7 passed, 0 failed** |
+| Matriz de arquivos | 9 tipos: JPG, PNG, MP4, PDF, ZIP, TXT, DOCX, código e extensão desconhecida |
+| Preview inline | Imagem e vídeo reconhecidos; demais tipos sem preview executável |
+| Download HTTP | Download forçado e preview inline autorizados por HMAC |
+| URLs transitórias | Não persistidas no payload SQLite |
+| E2E WebSocket moderno | passou dentro da suíte completa |
 | `cd hub_source && pnpm check` | passou |
 | `cd hub_source && pnpm build` | passou |
+| Sincronização para `client/public` | passou |
 | `git diff --check` | passou |
+| Scanner restrito de segredos | nenhum segredo óbvio encontrado |
 | `git diff -- launcher/launcher.py` | vazio; launcher intacto |
+| Smoke visual desktop | login, Hub, configurações, tema e retorno passaram |
+| Smoke visual mobile | viewport 390×844 sem overflow horizontal |
 
-O E2E moderno cobriu criação de grupo, upload em chunks binários, persistência de bytes, URL por destinatário, download HTTP autorizado, download negado a terceiro, busca por nome do anexo, fixação por participante e listagem sem duplicação. Os testes de backend também cobriram MIME inválido, tamanho excedido, path traversal, attachment forjado, busca autorizada/não autorizada, pin idempotente, presença em busca por display name e persistência após restart.
+O build final produziu `index-FGXXmVWM.js` e `index-CbLwjlsZ.css` em ambas as pastas públicas. O Vite exibiu somente os avisos já existentes sobre os placeholders de analytics `VITE_ANALYTICS_ENDPOINT` e `VITE_ANALYTICS_WEBSITE_ID`; esses avisos não interromperam o build e não pertencem ao launcher ou ao fluxo do Messenger.
 
-O build produziu o bundle final com JavaScript `index-DpRqUDqH.js` e CSS `index-DACH9Aii.css`, e o script de sincronização atualizou `client/public`. O Vite exibiu apenas os avisos já existentes sobre placeholders de analytics (`VITE_ANALYTICS_ENDPOINT`/`VITE_ANALYTICS_WEBSITE_ID`); eles não interromperam o build e não pertencem ao launcher ou às funcionalidades do MSN.
+## 12. Limitações restantes
 
-## 12. Segurança e limites restantes
+A busca ainda usa `LIKE` no SQLite, não FTS/tokenização. O conteúdo binário não é pesquisado. A UI envia um anexo por vez, as notificações são internas ao Hub e não push de sistema, e o listener HTTP de anexos exige publicação/proxy separado em hospedagem externa. Para volumes maiores que o cenário privado atual, recomenda-se streaming HTTP, storage dedicado, quotas por usuário e observabilidade específica.
 
-Nenhuma senha SMTP, senha de usuário, token completo de recuperação ou segredo HMAC foi colocado no código, frontend, testes ou Git. A recuperação local por código único continua sendo o mecanismo existente e o SMTP permanece opcional, sem virar dependência desta rodada. Links de anexos são temporários e HMAC-scoped; o arquivo interno não usa o nome fornecido pelo usuário como caminho.
+A detecção de vídeo valida assinaturas de contêiner conhecidas; arquivos de vídeo com contêiner incomum continuam como download genérico, por segurança. O servidor não executa nem interpreta documentos genéricos. A recuperação de conta permanece no mecanismo existente por código local; SMTP continua opcional e não foi transformado em dependência desta rodada.
 
-Os limites restantes são operacionais, não falhas de autorização: a implantação remota precisa publicar/proxyar uma segunda porta HTTP de anexos; o launcher local continua sondando apenas o WebSocket por decisão explícita de compatibilidade; a busca SQLite ainda é `LIKE`, não FTS; a UI envia um anexo por vez; e as notificações são internas ao Hub, não push móvel. O servidor ainda carrega o corpo completo do anexo na resposta HTTP, adequado ao limite padrão de 25 MiB e ao MSN privado pequeno, mas uma escala maior deve migrar para streaming ou storage dedicado.
+## Referências internas
 
-Não houve hospedagem, alteração irreversível de infraestrutura ou modificação do launcher nesta rodada.
+[1]: `server/attachments/manager.py` — armazenamento, normalização, hash, assinatura e detecção de mídia.
+[2]: `server/attachments/http.py` — listener HTTP de downloads autorizados.
+[3]: `server/core.py` — autorização e orquestração dos fluxos.
+[4]: `hub_source/client/src/pages/Home.tsx` — ChatView, previews, lightbox e configurações.
+[5]: `hub_source/client/src/index.css` — identidade visual, dark mode e responsividade.
+[6]: `server/tests/test_modern_features.py` — matriz moderna de testes e round-trip de anexos.
+[7]: `hub_source/sync-launcher-public.mjs` — sincronização do bundle para a pasta servida pelo launcher.

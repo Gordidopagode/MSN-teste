@@ -164,7 +164,7 @@ def parse_client_message(raw: Any) -> dict[str, Any]:
     elif command == "BEGIN_ATTACHMENT_UPLOAD":
         _require_string(data, "conversation_id")
         _require_string(data, "filename")
-        _require_string(data, "mime")
+        _require_string(data, "mime", nonempty=False)
         size = data["size"]
         if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
             raise ProtocolError("Campo 'size' deve ser um inteiro positivo.")

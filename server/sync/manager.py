@@ -55,7 +55,7 @@ class SyncManager:
         if record is None:
             return message
         public = {
-            **metadata,
+            **{key: value for key, value in metadata.items() if key not in {"download_url", "preview_url", "preview_kind"}},
             "original_name": record["original_name"],
             "mime_type": record["mime_type"],
             "size": record["size"],
@@ -64,6 +64,10 @@ class SyncManager:
         }
         if self._attachment_url_builder is not None:
             public["download_url"] = self._attachment_url_builder(record["attachment_id"], user_id)
+            kind = self._attachments.preview_kind(record)
+            if kind:
+                public["preview_kind"] = kind
+                public["preview_url"] = self._attachment_url_builder(record["attachment_id"], user_id, inline=True)
         return {**message, "payload": {**payload, "attachment": public}}
 
     def build_sync(self, session_id: str, user_id: str,

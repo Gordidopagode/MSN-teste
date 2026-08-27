@@ -117,6 +117,8 @@ export interface AttachmentPayload {
   sha256?: string;
   created_at?: string;
   download_url?: string;
+  preview_url?: string;
+  preview_kind?: "image" | "video";
 }
 
 export interface MessagePayload {

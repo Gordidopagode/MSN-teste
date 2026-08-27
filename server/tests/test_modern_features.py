@@ -1,15 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+import io
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from PIL import Image
+
+from server.attachments.http import AttachmentHTTPServer
 from server.attachments.manager import AttachmentError, AttachmentManager
 from server.core import ServerCore
 from server.network.protocol import ProtocolError, parse_client_message
 from server.tests.helpers import FakeServer, make_settings
 from server.tests.test_sessions import register_and_login
+
+
+def fetch_url(url: str) -> tuple[bytes, str]:
+    with urllib.request.urlopen(url, timeout=5) as response:
+        return response.read(), response.headers.get("Content-Disposition", "")
 
 
 @pytest.fixture
@@ -104,7 +116,13 @@ async def test_attachment_limits_and_path_traversal_are_enforced(server: FakeSer
     await server.core.begin_attachment_upload(
         sender_cid, conversation.conversation_id, "bad.exe", "application/x-msdownload", 4
     )
-    assert any(item["payload"]["code"] == "ATTACHMENT_MIME_NOT_ALLOWED" for item in server.find(sender_cid, "ERROR"))
+    ready = server.find(sender_cid, "ATTACHMENT_UPLOAD_READY")[-1]["payload"]
+    server.flush(sender_cid)
+    await server.core.receive_attachment_chunk(sender_cid, b"MZ!!")
+    await server.core.finish_attachment_upload(sender_cid, ready["upload_id"])
+    generic = server.find(sender_cid, "ATTACHMENT_UPLOAD_COMPLETE")[-1]["payload"]["attachment"]
+    assert generic["original_name"] == "bad.exe"
+    assert generic["mime_type"] == "application/x-msdownload"
     server.flush(sender_cid)
     await server.core.begin_attachment_upload(
         sender_cid, conversation.conversation_id, "large.txt", "text/plain", server.settings.attachment_max_bytes + 1
@@ -174,12 +192,94 @@ async def test_user_search_returns_display_name_and_canonical_presence(server: F
     assert result["presence"]["custom_status"] == "em chamada"
 
 
-def test_attachment_manager_rejects_invalid_metadata(server: FakeServer):
+def test_attachment_manager_sanitizes_names_and_rejects_invalid_sizes(server: FakeServer):
     manager: AttachmentManager = server.core.attachments
-    with pytest.raises(AttachmentError):
-        manager.begin_upload("conn", "user", "conv", "../../secret.bin", "application/octet-stream", 10)
+    upload = manager.begin_upload("conn", "user", "conv", "..\\\\..\\\\secret.bin", "application/x-unknown", 10)
+    assert manager._uploads[upload["upload_id"]]["filename"] == "secret.bin"
+    assert manager._uploads[upload["upload_id"]]["mime"] == "application/x-unknown"
+    manager.abort_upload("conn", upload["upload_id"])
     with pytest.raises(AttachmentError):
         manager.begin_upload("conn", "user", "conv", "file.txt", "text/plain", 0)
     with pytest.raises(AttachmentError):
         manager.begin_upload("conn", "user", "conv", "file.txt", "text/plain", server.settings.attachment_max_bytes + 1)
     assert Path(server.tmpdir).exists()
+
+
+@pytest.mark.asyncio
+async def test_generic_attachment_catalog_round_trip(server: FakeServer):
+    sender_cid, _ = await register_and_login(server, "catalog_sender")
+    recipient_cid, _ = await register_and_login(server, "catalog_recipient")
+    sender_id = server.core.store.get_user_by_username("catalog_sender")["user_id"]
+    recipient_id = server.core.store.get_user_by_username("catalog_recipient")["user_id"]
+    conversation = server.core.conversations.get_or_create_individual(sender_id, recipient_id)
+
+    jpeg = io.BytesIO()
+    Image.new("RGB", (3, 2), (40, 120, 180)).save(jpeg, format="JPEG")
+    png = io.BytesIO()
+    Image.new("RGBA", (2, 3), (40, 180, 120, 255)).save(png, format="PNG")
+    cases = [
+        ("photo.jpg", "image/jpeg", jpeg.getvalue()),
+        ("image.png", "image/png", png.getvalue()),
+        ("clip.mp4", "video/mp4", (Path(__file__).parent / "fixtures" / "tiny.mp4").read_bytes()),
+        ("manual.pdf", "application/pdf", b"%PDF-1.7\nminimal"),
+        ("archive.zip", "application/zip", b"PK" + bytes([3, 4]) + b"archive"),
+        ("notes.txt", "text/plain", b"plain text"),
+        ("report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", b"PK" + bytes([3, 4]) + b"docx"),
+        ("script.py", "text/x-python", b"print('hello')"),
+        ("unknown.msnblob", "application/x-msn-unknown", b"opaque bytes" + bytes([0, 1])),
+    ]
+    http = AttachmentHTTPServer(server.core)
+    await http.start("127.0.0.1", 0)
+    port = http.sockets[0].getsockname()[1]
+    server.core.settings.public_base_url = f"http://127.0.0.1:{port}"
+    try:
+        for filename, mime, content in cases:
+            server.flush(sender_cid)
+            server.flush(recipient_cid)
+            await server.core.begin_attachment_upload(
+                sender_cid, conversation.conversation_id, filename, mime, len(content)
+            )
+            ready = server.find(sender_cid, "ATTACHMENT_UPLOAD_READY")[-1]["payload"]
+            server.flush(sender_cid)
+            for offset in range(0, len(content), ready["chunk_size"]):
+                await server.core.receive_attachment_chunk(sender_cid, content[offset:offset + ready["chunk_size"]])
+            await server.core.finish_attachment_upload(sender_cid, ready["upload_id"])
+            complete = server.find(sender_cid, "ATTACHMENT_UPLOAD_COMPLETE")[-1]["payload"]["attachment"]
+            delivered = [item for item in server.pending_for(recipient_cid) if item["type"] == "MESSAGE"]
+            assert delivered, filename
+            received = delivered[-1]["payload"]["message"]["payload"]["attachment"]
+            assert received["original_name"] == filename
+            assert received["size"] == len(content)
+            assert received["download_url"]
+            downloaded, disposition = await asyncio.to_thread(fetch_url, received["download_url"])
+            assert downloaded == content
+            assert disposition.startswith("attachment;")
+            if mime.startswith("image/"):
+                assert complete["preview_kind"] == "image"
+                assert complete["preview_url"]
+                previewed, preview_disposition = await asyncio.to_thread(fetch_url, complete["preview_url"])
+                assert previewed == content
+                assert preview_disposition.startswith("inline;")
+            elif mime.startswith("video/"):
+                assert complete["preview_kind"] == "video"
+                assert complete["preview_url"]
+                previewed, preview_disposition = await asyncio.to_thread(fetch_url, complete["preview_url"])
+                assert previewed == content
+                assert preview_disposition.startswith("inline;")
+            else:
+                assert "preview_url" not in complete
+            stored = server.core.attachments.get_attachment(complete["attachment_id"])
+            assert stored is not None
+            with server.core.attachments.open_attachment(stored) as handle:
+                assert handle.read() == content
+
+        restarted = ServerCore(make_settings(server.tmpdir, port=10002))
+        persisted = restarted.store.list_conversation_messages(conversation.conversation_id)
+        assert len(persisted) == len(cases)
+        assert {item["payload"]["attachment"]["original_name"] for item in persisted} == {item[0] for item in cases}
+        for item in persisted:
+            stored_payload = item["payload"]["attachment"]
+            assert "download_url" not in stored_payload
+            assert "preview_url" not in stored_payload
+    finally:
+        await http.close()

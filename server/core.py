@@ -614,15 +614,16 @@ class ServerCore:
 
     # -- attachments ----------------------------------------------------------
 
-    def _attachment_public_url(self, attachment_id: str, user_id: str) -> str:
+    def _attachment_public_url(self, attachment_id: str, user_id: str, inline: bool = False) -> str:
         base = self.settings.public_base_url
         if not base:
             host = "127.0.0.1" if self.settings.host in {"0.0.0.0", "::"} else self.settings.host
-            base = f"http://{host}:{self.settings.port}"
-        return self.attachments.signed_download_url(attachment_id, user_id, base)
+            port = getattr(self.settings, "attachment_http_port", 0) or (self.settings.port + 1)
+            base = f"http://{host}:{port}"
+        return self.attachments.signed_download_url(attachment_id, user_id, base, inline=inline)
 
     def _public_attachment(self, attachment: dict[str, Any], user_id: str) -> dict[str, Any]:
-        return {
+        public = {
             "attachment_id": attachment["attachment_id"],
             "original_name": attachment["original_name"],
             "mime_type": attachment["mime_type"],
@@ -631,6 +632,11 @@ class ServerCore:
             "created_at": attachment["created_at"],
             "download_url": self._attachment_public_url(attachment["attachment_id"], user_id),
         }
+        kind = self.attachments.preview_kind(attachment)
+        if kind:
+            public["preview_kind"] = kind
+            public["preview_url"] = self._attachment_public_url(attachment["attachment_id"], user_id, inline=True)
+        return public
 
     async def begin_attachment_upload(self, connection_id: str, conversation_id: str,
                                       filename: str, mime: str, size: int) -> None:
@@ -691,7 +697,7 @@ class ServerCore:
             if attachment["owner_id"] != entry["user"]["user_id"] or not self.conversations.is_participant(attachment["conversation_id"], entry["user"]["user_id"]):
                 raise AttachmentError("UPLOAD_FORBIDDEN", "Este upload não pertence a essa conta ou conversa.")
             public_attachment = self._public_attachment(attachment, entry["user"]["user_id"])
-            stored_attachment = {key: value for key, value in public_attachment.items() if key != "download_url"}
+            stored_attachment = {key: value for key, value in public_attachment.items() if key not in {"download_url", "preview_url"}}
             payload = {"attachment": stored_attachment}
             result = await self.messages.send_message(
                 entry["user"]["user_id"], attachment["conversation_id"], "attachment", payload,

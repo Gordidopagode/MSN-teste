@@ -3,13 +3,16 @@ from __future__ import annotations
 import hashlib
 import hmac
 import mimetypes
+import re
 import secrets
 import time
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlencode
+
+from PIL import Image, UnidentifiedImageError
 
 from server.shared_types import now_iso
-from urllib.parse import urlencode
 
 
 class AttachmentError(Exception):
@@ -18,28 +21,15 @@ class AttachmentError(Exception):
         self.code = code
 
 
-DEFAULT_ALLOWED_MIME_TYPES = {
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "application/pdf",
-    "text/plain",
-    "text/csv",
-    "application/zip",
-    "application/json",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-}
+_MIME_RE = re.compile(r"^[a-z0-9!#$&^_.+\-]+/[a-z0-9!#$&^_.+\-]+$")
 
 
 class AttachmentManager:
-    """Persistent local attachment storage.
+    """Persistent, generic local attachment storage.
 
-    Bytes live under ``<data_dir>/attachments`` and SQLite stores only metadata.
-    Upload state is kept in memory and is bound to the authenticated connection;
-    completed attachments are durable and are authorized by the core.
+    The client-provided MIME value is metadata only: it is normalized to a
+    syntactically valid value or ``application/octet-stream`` and is never an
+    allowlist gate. Preview decisions are made separately from file bytes.
     """
 
     def __init__(self, store: Any, settings: Any) -> None:
@@ -65,7 +55,10 @@ class AttachmentManager:
                 pass
             return value
         except OSError as exc:
-            raise AttachmentError("ATTACHMENT_STORAGE_UNAVAILABLE", "O armazenamento de anexos não está disponível.") from exc
+            raise AttachmentError(
+                "ATTACHMENT_STORAGE_UNAVAILABLE",
+                "O armazenamento de anexos não está disponível.",
+            ) from exc
 
     @property
     def max_bytes(self) -> int:
@@ -75,14 +68,13 @@ class AttachmentManager:
     def chunk_bytes(self) -> int:
         return int(getattr(self.settings, "attachment_chunk_bytes", 128 * 1024))
 
-    @property
-    def allowed_mime_types(self) -> set[str]:
-        configured = getattr(self.settings, "attachment_allowed_mime_types", None)
-        return set(configured or DEFAULT_ALLOWED_MIME_TYPES)
-
     @staticmethod
     def sanitize_filename(filename: str) -> str:
-        value = Path(filename or "arquivo").name.replace("\x00", "").strip()
+        # Treat both POSIX and Windows separators as path delimiters before
+        # retaining only the basename. The server never uses this value as a
+        # filesystem path; it is stored/displayed as the original label.
+        raw = str(filename or "arquivo").replace("\\", "/")
+        value = Path(raw).name.replace("\x00", "").strip()
         value = "".join(char for char in value if char.isprintable())
         if not value or value in {".", ".."}:
             raise AttachmentError("INVALID_ATTACHMENT_NAME", "O nome do arquivo é inválido.")
@@ -91,19 +83,36 @@ class AttachmentManager:
             value = value[: 180 - len(suffix)] + suffix
         return value
 
+    @staticmethod
+    def normalize_mime(filename: str, mime: str) -> str:
+        value = (mime or "").lower().split(";", 1)[0].strip()
+        if not value:
+            value = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        if len(value) > 127 or not _MIME_RE.fullmatch(value):
+            return "application/octet-stream"
+        return value
+
     def _validate_metadata(self, filename: str, mime: str, size: int) -> tuple[str, str, int]:
         clean_name = self.sanitize_filename(filename)
-        clean_mime = (mime or mimetypes.guess_type(clean_name)[0] or "application/octet-stream").lower().split(";", 1)[0].strip()
-        if clean_mime not in self.allowed_mime_types:
-            raise AttachmentError("ATTACHMENT_MIME_NOT_ALLOWED", "Este tipo de arquivo não é permitido.")
+        clean_mime = self.normalize_mime(clean_name, mime)
         if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
             raise AttachmentError("INVALID_ATTACHMENT_SIZE", "O tamanho do arquivo é inválido.")
         if size > self.max_bytes:
-            raise AttachmentError("ATTACHMENT_TOO_LARGE", f"O arquivo deve ter no máximo {self.max_bytes} bytes.")
+            raise AttachmentError(
+                "ATTACHMENT_TOO_LARGE",
+                f"O arquivo deve ter no máximo {self.max_bytes} bytes.",
+            )
         return clean_name, clean_mime, size
 
-    def begin_upload(self, connection_id: str, user_id: str, conversation_id: str,
-                     filename: str, mime: str, size: int) -> dict[str, Any]:
+    def begin_upload(
+        self,
+        connection_id: str,
+        user_id: str,
+        conversation_id: str,
+        filename: str,
+        mime: str,
+        size: int,
+    ) -> dict[str, Any]:
         clean_name, clean_mime, clean_size = self._validate_metadata(filename, mime, size)
         upload_id = secrets.token_urlsafe(18)
         temp_dir = self.root / ".uploads"
@@ -166,7 +175,17 @@ class AttachmentManager:
         final_dir.mkdir(parents=True, exist_ok=True)
         final_path = final_dir / attachment_id
         upload["path"].replace(final_path)
-        digest = hashlib.sha256(final_path.read_bytes()).hexdigest()
+        try:
+            actual_size = final_path.stat().st_size
+            if actual_size != upload["size"]:
+                final_path.unlink(missing_ok=True)
+                self._uploads.pop(upload_id, None)
+                raise AttachmentError("UPLOAD_SIZE_MISMATCH", "O tamanho físico do upload não confere.")
+            digest = hashlib.sha256(final_path.read_bytes()).hexdigest()
+        except Exception:
+            self._uploads.pop(upload_id, None)
+            final_path.unlink(missing_ok=True)
+            raise
         attachment = {
             "attachment_id": attachment_id,
             "conversation_id": upload["conversation_id"],
@@ -181,6 +200,7 @@ class AttachmentManager:
         try:
             self.store.create_attachment(attachment)
         except Exception:
+            self._uploads.pop(upload_id, None)
             final_path.unlink(missing_ok=True)
             raise
         self._uploads.pop(upload_id, None)
@@ -205,22 +225,64 @@ class AttachmentManager:
             raise AttachmentError("ATTACHMENT_NOT_FOUND", "Anexo não encontrado.")
         return path.open("rb")
 
-    def signed_download_url(self, attachment_id: str, user_id: str,
-                            base_url: str = "") -> str:
-        expires = int(time.time()) + 3600
-        message = f"{attachment_id}:{user_id}:{expires}".encode()
-        signature = hmac.new(self._secret, message, hashlib.sha256).hexdigest()
-        query = urlencode({"user": user_id, "expires": expires, "sig": signature})
-        return f"{base_url.rstrip('/')}/attachments/{attachment_id}?{query}"
+    def preview_kind(self, attachment: dict[str, Any]) -> Optional[str]:
+        """Return ``image``/``video`` only for recognized, safe media bytes."""
+        mime = str(attachment.get("mime_type") or "").lower()
+        try:
+            with self.open_attachment(attachment) as handle:
+                header = handle.read(32)
+                handle.seek(0)
+                if mime.startswith("image/"):
+                    try:
+                        with Image.open(handle) as image:
+                            image.verify()
+                        return "image"
+                    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+                        return None
+                if mime.startswith("video/"):
+                    if header.startswith(b"\x1a\x45\xdf\xa3"):
+                        return "video"  # WebM/Matroska
+                    if len(header) >= 12 and header[4:8] == b"ftyp":
+                        return "video"  # MP4/MOV family
+                    if header.startswith(b"RIFF") and header[8:12] == b"AVI ":
+                        return "video"
+                    if header.startswith(b"OggS") or header.startswith(b"\x00\x00\x01\xba"):
+                        return "video"
+        except (AttachmentError, OSError):
+            return None
+        return None
 
-    def verify_download_signature(self, attachment_id: str, user_id: str,
-                                  expires: str, signature: str) -> bool:
+    def signed_download_url(
+        self,
+        attachment_id: str,
+        user_id: str,
+        base_url: str = "",
+        inline: bool = False,
+    ) -> str:
+        expires = int(time.time()) + 3600
+        mode = "inline" if inline else "download"
+        message = f"{attachment_id}:{user_id}:{expires}:{mode}".encode()
+        signature = hmac.new(self._secret, message, hashlib.sha256).hexdigest()
+        query = {"user": user_id, "expires": expires, "sig": signature}
+        if inline:
+            query["inline"] = "1"
+        return f"{base_url.rstrip('/')}/attachments/{attachment_id}?{urlencode(query)}"
+
+    def verify_download_signature(
+        self,
+        attachment_id: str,
+        user_id: str,
+        expires: str,
+        signature: str,
+        inline: str = "",
+    ) -> bool:
         try:
             expiry = int(expires)
         except (TypeError, ValueError):
             return False
         if expiry < int(time.time()) or not signature or not user_id:
             return False
-        message = f"{attachment_id}:{user_id}:{expiry}".encode()
+        mode = "inline" if inline == "1" else "download"
+        message = f"{attachment_id}:{user_id}:{expiry}:{mode}".encode()
         expected = hmac.new(self._secret, message, hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, signature)

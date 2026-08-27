@@ -9,6 +9,8 @@ import {
   ArrowLeft,
   Bell,
   Download,
+  File as FileIcon,
+  Maximize2,
   Check,
   ChevronDown,
   CircleHelp,
@@ -628,7 +630,7 @@ function SettingsPanel({
   }, [theme]);
   return (
     <aside className="settings-panel profile-panel" aria-label="Perfil e configurações">
-      <div className="settings-heading"><div><span className="eyebrow">perfil</span><h2>Meu espaço</h2></div><IconButton label="Fechar configurações" onClick={onClose}><X size={15} /></IconButton></div>
+      <div className="settings-heading settings-screen-heading"><div><span className="eyebrow">configurações</span><h1>Meu espaço</h1><p>Conta, aparência e conexão do seu Messenger.</p></div><button className="settings-back-button" type="button" onClick={onClose}><ArrowLeft size={15} /> Voltar ao Hub</button></div>
       <div className="profile-editor">
         <div className="profile-avatar profile-avatar-small">{session.avatar_data ? <img src={session.avatar_data} alt="Foto de perfil" /> : ownInitials}<StatusDot status={status} /></div>
         <button className="text-button" type="button" onClick={() => fileRef.current?.click()} disabled={busy}>Alterar foto de perfil</button>
@@ -789,6 +791,73 @@ function messagePreview(message: MessagePayload): string {
   return message.payload?.attachment?.original_name ? `Anexo: ${message.payload.attachment.original_name}` : `[${message.type}]`;
 }
 
+function formatFileSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} KB`;
+  if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(size < 10 * 1024 * 1024 ? 1 : 0)} MB`;
+  return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function fileExtension(name: string): string {
+  const value = name.split(".").pop()?.trim().toUpperCase() || "FILE";
+  return value.length > 8 ? "FILE" : value;
+}
+
+function attachmentCategory(attachment: NonNullable<MessagePayload["payload"]["attachment"]>): string {
+  const name = attachment.original_name.toLowerCase();
+  const mime = attachment.mime_type.toLowerCase();
+  if (mime === "application/pdf" || name.endsWith(".pdf")) return "PDF";
+  if (mime.includes("zip") || mime.includes("rar") || mime.includes("7z") || /\\.(zip|rar|7z|tar|gz)$/i.test(name)) return "ARQUIVO";
+  if (mime.includes("word") || mime.includes("document") || /\\.(doc|docx|odt|rtf)$/i.test(name)) return "DOC";
+  if (mime.includes("sheet") || mime.includes("excel") || /\\.(xls|xlsx|csv|ods)$/i.test(name)) return "PLANILHA";
+  if (mime.includes("presentation") || /\\.(ppt|pptx|odp)$/i.test(name)) return "SLIDES";
+  if (mime.startsWith("text/") || /\\.(txt|py|js|ts|html|css|json|xml|md)$/i.test(name)) return "CÓDIGO";
+  if (mime.includes("executable") || mime.includes("android") || /\\.(exe|apk|msi|dmg)$/i.test(name)) return "APP";
+  return fileExtension(attachment.original_name);
+}
+
+function AttachmentView({ attachment }: { attachment: NonNullable<MessagePayload["payload"]["attachment"]> }) {
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const imagePreview = attachment.preview_kind === "image" && Boolean(attachment.preview_url);
+  const videoPreview = attachment.preview_kind === "video" && Boolean(attachment.preview_url);
+  const download = attachment.download_url;
+  useEffect(() => {
+    if (!lightboxOpen) return undefined;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setLightboxOpen(false); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [lightboxOpen]);
+  if (imagePreview) {
+    return (
+      <div className="media-preview image-preview">
+        <button className="media-image-button" type="button" onClick={() => setLightboxOpen(true)} aria-label={`Ampliar ${attachment.original_name}`}>
+          <img src={attachment.preview_url} alt={attachment.original_name} loading="lazy" decoding="async" />
+          <span className="media-expand"><Maximize2 size={13} /></span>
+        </button>
+        {download && <a className="media-download" href={download} download={attachment.original_name} aria-label={`Baixar ${attachment.original_name}`} title="Baixar arquivo"><Download size={13} /></a>}
+        <span className="media-caption">{attachment.original_name}</span>
+        {lightboxOpen && <div className="media-lightbox" role="dialog" aria-modal="true" aria-label={`Visualização de ${attachment.original_name}`} onClick={() => setLightboxOpen(false)}><div className="lightbox-content" onClick={(event) => event.stopPropagation()}><button className="lightbox-close" type="button" onClick={() => setLightboxOpen(false)} aria-label="Fechar visualização"><X size={18} /></button><img src={attachment.preview_url} alt={attachment.original_name} loading="lazy" decoding="async" />{download && <a className="lightbox-download" href={download} download={attachment.original_name}><Download size={14} /> Baixar original</a>}</div></div>}
+      </div>
+    );
+  }
+  if (videoPreview) {
+    return (
+      <div className="media-preview video-preview">
+        <video controls preload="metadata" src={attachment.preview_url} aria-label={attachment.original_name} />
+        {download && <a className="media-download" href={download} download={attachment.original_name} aria-label={`Baixar ${attachment.original_name}`} title="Baixar arquivo"><Download size={13} /></a>}
+        <span className="media-caption">{attachment.original_name}</span>
+      </div>
+    );
+  }
+  return (
+    <div className="generic-file-card">
+      <span className="file-icon"><FileIcon size={21} /><small>{attachmentCategory(attachment)}</small></span>
+      <span className="file-copy"><strong title={attachment.original_name}>{attachment.original_name}</strong><small>{fileExtension(attachment.original_name)} · {formatFileSize(attachment.size)}</small></span>
+      {download && <a className="file-download" href={download} download={attachment.original_name} aria-label={`Baixar ${attachment.original_name}`} title="Baixar arquivo"><Download size={15} /></a>}
+    </div>
+  );
+}
+
 function ChatView({ conversation, onSend, onLoadHistory, onSendAttachment, attachmentProgress, onSearchMessages, onPinMessage, onListPinnedMessages }: { conversation: Conversation; onSend: (text: string) => Promise<void>; onLoadHistory: (id: string) => Promise<void>; onSendAttachment: (id: string, file: File) => Promise<void>; attachmentProgress: { received: number; size: number } | null; onSearchMessages: (id: string, query: string) => Promise<MessagePayload[]>; onPinMessage: (id: string, messageId: string, pinned: boolean) => Promise<void>; onListPinnedMessages: (id: string) => Promise<MessagePayload[]> }) {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -860,7 +929,7 @@ function ChatView({ conversation, onSend, onLoadHistory, onSendAttachment, attac
         ) : conversation.messages.map((message: ChatMessage) => (
           <div className={`message-row ${message.author === "me" ? "mine" : ""} ${highlightedMessageId === message.id ? "is-highlighted" : ""}`} id={`message-${message.id}`} key={message.id}>
             <div className="message-meta"><strong>{message.author === "me" ? "Você" : message.authorName}</strong><time>{message.time}</time></div>
-            <div className="message-bubble">{message.attachment ? <span className="attachment-card">{message.attachment.mime_type.startsWith("image/") && message.attachment.download_url && <img src={message.attachment.download_url} alt={message.attachment.original_name} />}<span><strong>{message.attachment.original_name}</strong><small>{Math.ceil(message.attachment.size / 1024)} KB · {message.attachment.mime_type}</small><a href={message.attachment.download_url} target="_blank" rel="noreferrer"><Download size={13} /> Baixar</a></span></span> : message.text}</div>
+            <div className="message-bubble">{message.attachment ? <AttachmentView attachment={message.attachment} /> : message.text}</div>
             <button className={`message-pin ${message.isPinned ? "is-pinned" : ""}`} type="button" aria-label={message.isPinned ? "Desafixar mensagem" : "Fixar mensagem"} title={message.isPinned ? "Desafixar mensagem" : "Fixar mensagem"} onClick={() => void onPinMessage(conversation.id, message.id, !message.isPinned)}>{message.isPinned ? <PinOff size={12} /> : <Pin size={12} />}</button>
           </div>
         ))}
@@ -930,6 +999,9 @@ function Hub() {
   };
   const connectionStatus: Status = connectionState === "connected" ? "online" : connectionState === "disconnected" ? "offline" : "away";
   const ownInitials = session ? (session.displayName || session.username).slice(0, 2).toUpperCase() : "??";
+  useEffect(() => {
+    document.documentElement.dataset.msnTheme = window.localStorage.getItem("msn-hub-theme") || "light";
+  }, []);
 
   if (!session) return null;
 
@@ -959,7 +1031,8 @@ function Hub() {
         {error && (
           <div className="hub-error" role="alert"><span>{error}</span><button type="button" onClick={clearError} aria-label="Fechar aviso"><X size={14} /></button></div>
         )}
-        {notifications.length > 0 && <div className="notification-stack" aria-live="polite">{notifications.map((notification) => <button className="notification-card" type="button" key={notification.id} onClick={() => { if (notification.conversationId) setSelectedId(notification.conversationId); dismissNotification(notification.id); }}><Bell size={14} /><span><strong>{notification.title}</strong><small>{notification.body}</small></span><X size={12} /></button>)}</div>}
+        {!settingsOpen && notifications.length > 0 && <div className="notification-stack" aria-live="polite">{notifications.map((notification) => <button className="notification-card" type="button" key={notification.id} onClick={() => { if (notification.conversationId) setSelectedId(notification.conversationId); dismissNotification(notification.id); }}><Bell size={14} /><span><strong>{notification.title}</strong><small>{notification.body}</small></span><X size={12} /></button>)}</div>}
+        {settingsOpen ? <SettingsPanel session={session} serverUrl={serverUrl} connectionState={connectionState} status={status} onLogout={() => void logout()} onClose={() => setSettingsOpen(false)} onAvatar={setAvatar} onCustomStatus={setCustomStatus} onUpdateDisplayName={updateDisplayName} onChangePassword={changePassword} busy={busy} /> : <>
         <div className="hub-body">
           <aside className="profile-rail">
             <div className="rail-profile">
@@ -979,7 +1052,6 @@ function Hub() {
               <div className="rail-server"><Server size={14} /><span><small>servidor</small><strong>{serverUrl}</strong></span></div>
               <button className="rail-logout" type="button" onClick={() => void logout()} disabled={busy}><LogOut size={14} /> Sair</button>
             </div>
-            {settingsOpen && <SettingsPanel session={session} serverUrl={serverUrl} connectionState={connectionState} status={status} onLogout={() => void logout()} onClose={() => setSettingsOpen(false)} onAvatar={setAvatar} onCustomStatus={setCustomStatus} onUpdateDisplayName={updateDisplayName} onChangePassword={changePassword} busy={busy} />}
             {friendsOpen && <FriendsPanel friends={friends} searchUsers={searchUsers} sendFriendRequest={sendFriendRequest} respondFriendRequest={respondFriendRequest} removeFriend={removeFriend} openConversation={openConversation} onClose={() => setFriendsOpen(false)} busy={busy} />}
             {groupOpen && <GroupComposer friends={friends} searchUsers={searchUsers} onCreate={createGroup} onClose={() => setGroupOpen(false)} busy={busy} />}
           </aside>
@@ -1007,6 +1079,7 @@ function Hub() {
           <span className="connection-spacer" />
           <span className="connection-help"><CircleHelp size={13} /> Messenger Hub · dados do servidor</span>
         </footer>
+        </>}
       </section>
     </main>
   );
