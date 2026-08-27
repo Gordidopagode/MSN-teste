@@ -40,6 +40,7 @@ import {
   ConnectionState,
   MessengerWebSocket,
 } from "@/network/websocket";
+import { deriveConversationPresentation, deriveFriendPresence, type KnownUser } from "./presence";
 
 export type Status = "online" | "away" | "busy" | "offline";
 
@@ -96,15 +97,6 @@ type PendingRequest = {
   expected: string[];
   resolve: (payload: unknown) => void;
   reject: (error: Error) => void;
-};
-
-type KnownUser = {
-  userId: string;
-  username: string;
-  displayName: string;
-  avatar_data?: string | null;
-  avatar_mime?: string | null;
-  custom_status?: string;
 };
 
 export interface MessengerContextValue {
@@ -631,18 +623,37 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
         case "PROFILE_UPDATED": {
           const updated = payload as ProfileUpdatedPayload;
           const user = updated.user;
-          setPresence((items) => ({
-            ...items,
-            [user.user_id]: { ...items[user.user_id], username: user.username, display_name: user.display_name, avatar_data: user.avatar_data, avatar_mime: user.avatar_mime, custom_status: user.custom_status || "" },
-          }));
+          const nextPresence = {
+            ...presenceRef.current,
+            [user.user_id]: {
+              ...presenceRef.current[user.user_id],
+              username: user.username,
+              display_name: user.display_name,
+              avatar_data: user.avatar_data ?? null,
+              avatar_mime: user.avatar_mime ?? null,
+              custom_status: user.custom_status || "",
+            },
+          };
+          const nextUsers = {
+            ...knownUsersRef.current,
+            [user.user_id]: {
+              userId: user.user_id,
+              username: user.username,
+              displayName: user.display_name,
+              avatar_data: user.avatar_data ?? null,
+              avatar_mime: user.avatar_mime ?? null,
+              custom_status: user.custom_status || "",
+            },
+          };
+          presenceRef.current = nextPresence;
+          knownUsersRef.current = nextUsers;
+          setPresence(nextPresence);
+          setKnownUsers(nextUsers);
           setFriends((items) => items.map((friend) => friend.user_id === user.user_id
-            ? { ...friend, display_name: user.display_name, avatar_data: user.avatar_data, avatar_mime: user.avatar_mime, custom_status: user.custom_status || "" }
+            ? { ...friend, display_name: user.display_name, avatar_data: user.avatar_data ?? null, avatar_mime: user.avatar_mime ?? null, custom_status: user.custom_status || "" }
             : friend));
-          setConversations((items) => items.map((conversation) => conversation.participantIds.includes(user.user_id)
-            ? { ...conversation, customStatus: user.custom_status || "", avatarData: user.avatar_data, avatarMime: user.avatar_mime }
-            : conversation));
           if (sessionRef.current?.userId === user.user_id) {
-            const nextSession = { ...sessionRef.current, displayName: user.display_name, avatar_data: user.avatar_data, avatar_mime: user.avatar_mime, custom_status: user.custom_status || "" };
+            const nextSession = { ...sessionRef.current, displayName: user.display_name, avatar_data: user.avatar_data ?? null, avatar_mime: user.avatar_mime ?? null, custom_status: user.custom_status || "" };
             sessionRef.current = nextSession;
             setSession(nextSession);
           }
@@ -1046,19 +1057,7 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
   }, [client]);
 
   const visibleFriends = useMemo(
-    () => friends.map((friend) => {
-      const current = presence[friend.user_id];
-      if (!current) return friend;
-      return {
-        ...friend,
-        status: current.status,
-        status_message: current.status_message,
-        display_name: current.display_name || friend.display_name,
-        avatar_data: current.avatar_data ?? friend.avatar_data,
-        avatar_mime: current.avatar_mime ?? friend.avatar_mime,
-        custom_status: current.custom_status || friend.custom_status || "",
-      };
-    }),
+    () => friends.map((friend) => deriveFriendPresence(friend, presence)),
     [friends, presence],
   );
 
@@ -1072,15 +1071,20 @@ export function MessengerProvider({ children }: { children: ReactNode }) {
         created_at: "",
         last_message_at: null,
       };
-      const peerId = conversation.participantIds.find((id) => id !== session?.userId) || "";
-      const peerPresence = presence[peerId];
-      const peerUser = knownUsers[peerId];
+      const presented = deriveConversationPresentation(
+        payload,
+        session?.userId || "",
+        presence,
+        knownUsers,
+      );
       return {
         ...conversation,
-        status: statusForConversation(payload, session?.userId || "", presence),
-        customStatus: peerPresence?.custom_status || peerUser?.custom_status || conversation.customStatus,
-        avatarData: peerPresence?.avatar_data ?? peerUser?.avatar_data ?? conversation.avatarData,
-        avatarMime: peerPresence?.avatar_mime ?? peerUser?.avatar_mime ?? conversation.avatarMime,
+        name: presented.name,
+        initials: initialsFor(presented.name, conversation.id),
+        status: presented.status,
+        customStatus: presented.customStatus,
+        avatarData: presented.avatarData,
+        avatarMime: presented.avatarMime,
       };
     }),
     [conversations, knownUsers, presence, session?.userId],

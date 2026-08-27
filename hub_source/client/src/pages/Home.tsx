@@ -836,7 +836,7 @@ function AttachmentView({ attachment }: { attachment: NonNullable<MessagePayload
         </button>
         {download && <a className="media-download" href={download} download={attachment.original_name} aria-label={`Baixar ${attachment.original_name}`} title="Baixar arquivo"><Download size={13} /></a>}
         <span className="media-caption">{attachment.original_name}</span>
-        {lightboxOpen && <div className="media-lightbox" role="dialog" aria-modal="true" aria-label={`Visualização de ${attachment.original_name}`} onClick={() => setLightboxOpen(false)}><div className="lightbox-content" onClick={(event) => event.stopPropagation()}><button className="lightbox-close" type="button" onClick={() => setLightboxOpen(false)} aria-label="Fechar visualização"><X size={18} /></button><img src={attachment.preview_url} alt={attachment.original_name} loading="lazy" decoding="async" />{download && <a className="lightbox-download" href={download} download={attachment.original_name}><Download size={14} /> Baixar original</a>}</div></div>}
+        {lightboxOpen && <div className="media-lightbox" role="dialog" aria-modal="true" aria-label={`Visualização de ${attachment.original_name}`} onClick={() => setLightboxOpen(false)}><div className="lightbox-content" onClick={(event) => event.stopPropagation()}><button className="lightbox-close" type="button" onClick={() => setLightboxOpen(false)} aria-label="Fechar visualização"><X size={18} /></button><div className="lightbox-viewport"><img src={attachment.preview_url} alt={attachment.original_name} loading="lazy" decoding="async" /></div>{download && <a className="lightbox-download" href={download} download={attachment.original_name}><Download size={14} /> Baixar original</a>}</div></div>}
       </div>
     );
   }

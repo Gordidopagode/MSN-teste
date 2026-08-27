@@ -18,7 +18,7 @@ from websockets.asyncio.client import connect as ws_connect
 
 from server.config.settings import ServerSettings
 from server.core import ServerCore
-from server.tests.test_sync_persistence import ws_register_login, ws_send
+from server.tests.test_sync_persistence import ws_register_login, ws_send, ws_wait_type
 
 
 @pytest.mark.asyncio
@@ -59,7 +59,7 @@ async def test_five_clients_burst_history_and_reconnect():
             assert group["type"] == "CONVERSATION_CREATED"
             conversation_id = group["payload"]["conversation"]["conversation_id"]
             for ws in clients[1:]:
-                invitation = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                invitation = await ws_wait_type(ws, "CONVERSATION_CREATED")
                 assert invitation["type"] == "CONVERSATION_CREATED"
 
             for index in range(100):

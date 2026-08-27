@@ -153,6 +153,7 @@ class ServerCore:
         self.pending.pop(connection_id, None)
         self._msg_log.pop(session_id, None)
         self.presence.set_offline(user_id)
+        self._push_presence_update(user_id)
         self.bus._recorded.append(Event(USER_DISCONNECTED, f"connection:{connection_id}", {
             "user_id": user_id,
             "username": user["username"],
@@ -224,6 +225,9 @@ class ServerCore:
         if recovery_code:
             auth_payload["recovery_code"] = recovery_code
         self._push(connection_id, self._envelope("AUTH_OK", auth_payload))
+        # Publish the canonical online state after AUTH_OK so the logging-in
+        # client and all peers consume the same user-id keyed snapshot.
+        self._push_presence_update(user["user_id"], exclude_connection_id=connection_id)
 
     async def reconnect(self, connection_id: str, session_id: str) -> None:
         """Handle RECONNECT. Reuses a valid (possibly dormant) session."""
@@ -271,6 +275,7 @@ class ServerCore:
         self._push(connection_id, self._envelope("RECONNECT_OK", {
             "session_id": session.session_id,
         }))
+        self._push_presence_update(user["user_id"], exclude_connection_id=connection_id)
 
     def _force_close_session(self, session_id: str) -> None:
         entry = self.sessions.get_session_entry(session_id)
@@ -365,11 +370,15 @@ class ServerCore:
         return {user["user_id"]: self._public_presence(user["user_id"])
                 for user in self.store.list_users()}
 
-    def _push_presence_update(self, user_id: str) -> None:
-        self._push_to_all(self._envelope("USER_STATUS_CHANGED", {
+    def _push_presence_update(self, user_id: str, exclude_connection_id: Optional[str] = None) -> None:
+        envelope = self._envelope("USER_STATUS_CHANGED", {
             "user_id": user_id,
             **self._public_presence(user_id),
-        }))
+        })
+        for entry in self.sessions.iter_sessions():
+            connection = entry["connection"]
+            if connection and connection.connection_id != exclude_connection_id:
+                self._push(connection.connection_id, envelope)
 
     def _push_to_all(self, envelope: dict[str, Any], user_ids: Optional[set[str]] = None) -> None:
         for entry in self.sessions.iter_sessions():

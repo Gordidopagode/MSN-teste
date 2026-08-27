@@ -495,11 +495,12 @@ html[data-msn-theme="dark"] .notification-card small { color: #a8c2cb; }
 .media-caption { display: block; max-width: 100%; padding: 5px 30px 6px 8px; overflow: hidden; color: #557786; font-size: 9px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
 .video-preview { width: min(360px, 100%); }
 .video-preview video { display: block; width: 100%; max-height: 280px; background: #132630; object-fit: contain; }
-.media-lightbox { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(5, 18, 25, .82); backdrop-filter: blur(7px); }
-.lightbox-content { position: relative; max-width: 96vw; max-height: 94vh; padding: 15px; display: grid; justify-items: center; gap: 10px; border: 1px solid rgba(197, 228, 239, .48); border-radius: 7px; background: rgba(22, 42, 51, .94); box-shadow: 0 20px 70px rgba(0,0,0,.42); }
-.lightbox-content img { display: block; max-width: min(90vw, 1100px); max-height: 80vh; width: auto; height: auto; object-fit: contain; }
-.lightbox-close { position: absolute; z-index: 2; top: 8px; right: 8px; width: 29px; height: 29px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.5); border-radius: 4px; color: #fff; background: rgba(18, 40, 50, .78); }
-.lightbox-download { display: inline-flex; align-items: center; gap: 5px; padding: 6px 9px; border: 1px solid #6ea5bd; border-radius: 4px; color: #eaf8fc; background: #245d79; font-size: 10px; font-weight: 700; text-decoration: none; }
+.media-lightbox { position: fixed; z-index: 100; inset: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); background: rgba(5, 18, 25, .82); backdrop-filter: blur(7px); }
+.lightbox-content { position: relative; display: flex; flex: 0 1 1200px; flex-direction: column; align-items: center; gap: 10px; width: min(1200px, 100%); height: 100%; max-width: 100%; max-height: 100%; min-width: 0; min-height: 0; overflow: hidden; padding: 50px 16px max(16px, env(safe-area-inset-bottom)); border: 1px solid rgba(197, 228, 239, .48); border-radius: 7px; background: rgba(22, 42, 51, .94); box-shadow: 0 20px 70px rgba(0,0,0,.42); }
+.lightbox-viewport { display: flex; flex: 1 1 auto; align-items: center; justify-content: center; width: 100%; height: 100%; max-width: 100%; max-height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
+.lightbox-viewport img { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; }
+.lightbox-close { position: absolute; z-index: 2; top: max(10px, env(safe-area-inset-top)); right: max(10px, env(safe-area-inset-right)); width: 29px; height: 29px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.5); border-radius: 4px; color: #fff; background: rgba(18, 40, 50, .78); }
+.lightbox-download { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 6px 9px; border: 1px solid #6ea5bd; border-radius: 4px; color: #eaf8fc; background: #245d79; font-size: 10px; font-weight: 700; text-decoration: none; }
 .generic-file-card { width: min(320px, 100%); min-height: 57px; padding: 8px 9px; display: flex; align-items: center; gap: 9px; border: 1px solid #c7dbe2; border-radius: 5px; background: #f7fbfc; }
 .file-icon { width: 38px; height: 38px; flex: none; display: grid; place-items: center; border: 1px solid #b5d0db; border-radius: 4px; color: var(--blue-deep); background: #e7f3f7; }
 .file-icon small { margin-top: -4px; color: #668795; font-size: 7px; font-weight: 700; letter-spacing: .04em; }
@@ -585,8 +586,10 @@ html[data-msn-theme="dark"] .notification-card small { color: #aac4cd; }
   .media-preview, .video-preview, .generic-file-card { max-width: 100%; }
   .media-image-button img { max-height: 230px; }
   .video-preview video { max-height: 230px; }
-  .media-lightbox { padding: 10px; }
-  .lightbox-content { padding: 10px; }
+  .media-lightbox { padding: max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)); }
+  .lightbox-content { width: 100%; height: 100%; padding: 48px 10px max(12px, env(safe-area-inset-bottom)); }
+  .lightbox-viewport { height: 100%; }
+  .lightbox-close { top: max(8px, env(safe-area-inset-top)); right: max(8px, env(safe-area-inset-right)); }
 }
 
 html[data-msn-theme="dark"] .logout-button { color: #f0a29b; background: rgba(92, 47, 51, .58); border-color: #8e5b60; }

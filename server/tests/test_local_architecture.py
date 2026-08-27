@@ -18,7 +18,7 @@ from server.core import ServerCore
 from server.network.handler import WebSocketHandler
 from server.network.protocol import ProtocolError, parse_client_message
 from server.tests.helpers import make_settings
-from server.tests.test_sync_persistence import ws_send
+from server.tests.test_sync_persistence import ws_send, ws_wait_type
 
 
 async def _close_all(*sockets) -> None:
@@ -66,7 +66,7 @@ async def test_local_server_without_smtp_keeps_login_chat_and_recovery_alive() -
                     participants=["no_smtp_b"],
                 )
                 group_id = group["payload"]["conversation"]["conversation_id"]
-                invitation = json.loads(await ws_b.recv())
+                invitation = await ws_wait_type(ws_b, "CONVERSATION_CREATED")
                 assert invitation["type"] == "CONVERSATION_CREATED"
 
                 reset_response = await ws_send(
@@ -120,8 +120,11 @@ async def test_three_clients_stay_connected_during_concurrent_local_recovery() -
                     participants=["three_b", "three_c"],
                 )
                 group_id = group["payload"]["conversation"]["conversation_id"]
-                invitations = await asyncio.gather(sockets[1].recv(), sockets[2].recv())
-                assert all(json.loads(item)["type"] == "CONVERSATION_CREATED" for item in invitations)
+                invitations = await asyncio.gather(
+                    ws_wait_type(sockets[1], "CONVERSATION_CREATED"),
+                    ws_wait_type(sockets[2], "CONVERSATION_CREATED"),
+                )
+                assert all(item["type"] == "CONVERSATION_CREATED" for item in invitations)
 
                 responses = await asyncio.gather(*(
                     ws_send(

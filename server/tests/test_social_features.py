@@ -156,3 +156,31 @@ async def test_duplicate_requests_and_invalid_avatars_are_rejected():
         assert server.find(alice_cid, "ERROR")[-1]["payload"]["code"] == "AVATAR_TOO_LARGE"
     finally:
         server.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_avatar_updates_remain_isolated_between_two_users():
+    server = FakeServer()
+    try:
+        alice_cid, _ = await register_and_login(server, "avatar_alice")
+        bob_cid, _ = await register_and_login(server, "avatar_bob")
+        alice_id = server.core.store.get_user_by_username("avatar_alice")["user_id"]
+        bob_id = server.core.store.get_user_by_username("avatar_bob")["user_id"]
+        server.flush(alice_cid)
+        server.flush(bob_cid)
+
+        await server.core.set_avatar(bob_cid, PNG_DATA_URL, "bob.png", "image/png")
+        bob_notice = [event for event in server.pending_for(alice_cid) if event["type"] == "PROFILE_UPDATED"][-1]
+        assert bob_notice["payload"]["user"]["user_id"] == bob_id
+        assert server.core.store.get_user(alice_id)["avatar_data"] is None
+        assert server.core.store.get_user(bob_id)["avatar_data"].startswith("data:image/jpeg;base64,")
+        server.flush(alice_cid)
+        server.flush(bob_cid)
+
+        await server.core.set_avatar(alice_cid, PNG_DATA_URL, "alice.png", "image/png")
+        alice_notice = [event for event in server.pending_for(bob_cid) if event["type"] == "PROFILE_UPDATED"][-1]
+        assert alice_notice["payload"]["user"]["user_id"] == alice_id
+        assert server.core.store.get_user(alice_id)["avatar_data"].startswith("data:image/jpeg;base64,")
+        assert server.core.store.get_user(bob_id)["avatar_data"].startswith("data:image/jpeg;base64,")
+    finally:
+        server.cleanup()

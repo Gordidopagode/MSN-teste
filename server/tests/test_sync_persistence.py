@@ -143,7 +143,15 @@ async def ws_send(ws, **fields) -> dict:
     msg = {"command": fields.pop("command")}
     msg.update(fields)
     await ws.send(json.dumps(msg))
-    return json.loads(await ws.recv())
+    # Presence changes are unsolicited broadcasts and can be queued while a
+    # raw test client waits for its command response. The production provider
+    # already routes these by message type; mirror that behavior in this
+    # request helper without discarding any non-presence response.
+    while True:
+        response = json.loads(await ws.recv())
+        if response.get("type") == "USER_STATUS_CHANGED":
+            continue
+        return response
 
 
 async def ws_wait_type(ws, expected):
